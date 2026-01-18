@@ -34,7 +34,7 @@ if not st.session_state.user_nickname:
 st.sidebar.title(f"👤 學員: {st.session_state.user_nickname}")
 st.sidebar.markdown("---")
 
-# 強制顯示輸入框，讓老師輸入自己的 Key (解決資源耗盡問題)
+# 強制顯示輸入框，解決資源耗盡問題
 st.sidebar.warning("🔑 請輸入您自己的 Gemini API Key 以開始演練")
 api_key = st.sidebar.text_input("在此貼上您的 API Key", type="password")
 
@@ -59,7 +59,7 @@ lang = st.sidebar.selectbox("語言", ["繁體中文", "粵語", "English"])
 # --- 4. 自動讀取教材 (升級：讀取倉庫內所有 PDF) ---
 if not st.session_state.loaded_text:
     combined_text = ""
-    pdf_files = glob.glob("*.pdf") # 自動尋找所有 PDF 檔案
+    pdf_files = glob.glob("*.pdf")
     
     if pdf_files:
         with st.spinner(f"📚 系統正在內化 {len(pdf_files)} 份教材..."):
@@ -83,7 +83,11 @@ def generate_random_persona(grade):
     responses = ["戰 (Fight) - 頂嘴/憤怒", "逃 (Flight) - 逃避", "凍結 (Freeze) - 呆滯", "討好 (Fawn) - 過度道歉"]
     return {
         "name": random.choice(names),
-        "background": random.choice(backgrounds),<br>        "trigger": random.choice(triggers),<br>        "response_mode": random.choice(responses),<br>        "grade": grade<br>    }
+        "background": random.choice(backgrounds),
+        "trigger": random.choice(triggers),
+        "response_mode": random.choice(responses),
+        "grade": grade
+    }
 
 # --- 6. 模擬器主畫面 ---
 st.title("🛡️ 創傷知情模擬器")
@@ -104,7 +108,6 @@ if st.session_state.loaded_text and api_key and valid_model_name:
             persona = generate_random_persona(student_grade)
             st.session_state.current_persona = persona
             
-            # 系統 Prompt 加入完整文本作為大腦基礎
             sys_prompt = f"""
             Role: You are a {persona['grade']} student named {persona['name']}. 
             Your trauma background: {persona['background']}. 
