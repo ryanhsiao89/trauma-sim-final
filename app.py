@@ -33,11 +33,14 @@ if not st.session_state.user_nickname:
 st.sidebar.title(f"👤 學員: {st.session_state.user_nickname}")
 st.sidebar.markdown("---")
 
-# API Key 後台讀取
-api_key = os.getenv("GEMINI_API_KEY")
-if not api_key:
-    api_key = st.sidebar.text_input("Gemini API Key", type="password")
+# 強制顯示輸入框，讓老師輸入自己的 Key
+st.sidebar.warning("🔑 請輸入您自己的 Gemini API Key 以開始演練")
+api_key = st.sidebar.text_input("在此貼上您的 API Key", type="password")
 
+if not api_key:
+    st.info("💡 提示：請先在側邊欄輸入 API Key，否則系統無法運作。")
+    st.stop() # 如果沒輸入 Key，程式就停在這裡
+    
 # 自動偵測模型
 valid_model_name = None
 if api_key:
