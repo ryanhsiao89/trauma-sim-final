@@ -1,6 +1,7 @@
 import streamlit as st
 import os
 import random
+import glob
 import pandas as pd
 from datetime import datetime
 from pypdf import PdfReader
@@ -8,7 +9,7 @@ import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 
 # --- 1. 系統設定 ---
-st.set_page_config(page_title="創傷知情模擬器 (含匯出功能)", layout="wide")
+st.set_page_config(page_title="創傷知情模擬器 (全文本升級版)", layout="wide")
 
 # 初始化 Session State
 if "history" not in st.session_state: st.session_state.history = []
@@ -33,13 +34,13 @@ if not st.session_state.user_nickname:
 st.sidebar.title(f"👤 學員: {st.session_state.user_nickname}")
 st.sidebar.markdown("---")
 
-# 強制顯示輸入框，讓老師輸入自己的 Key
+# 強制顯示輸入框，讓老師輸入自己的 Key (解決資源耗盡問題)
 st.sidebar.warning("🔑 請輸入您自己的 Gemini API Key 以開始演練")
 api_key = st.sidebar.text_input("在此貼上您的 API Key", type="password")
 
 if not api_key:
     st.info("💡 提示：請先在側邊欄輸入 API Key，否則系統無法運作。")
-    st.stop() # 如果沒輸入 Key，程式就停在這裡
+    st.stop() 
     
 # 自動偵測模型
 valid_model_name = None
@@ -49,26 +50,30 @@ if api_key:
         available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         if available_models:
             valid_model_name = st.sidebar.selectbox("🤖 AI 模型", available_models)
-    except: pass
+    except: 
+        st.sidebar.error("❌ API Key 無效")
 
 student_grade = st.sidebar.selectbox("學生年級", ["國小", "國中", "高中"])
 lang = st.sidebar.selectbox("語言", ["繁體中文", "粵語", "English"])
 
-# --- 4. 自動讀取教材 ---
-TARGET_FILENAME = "創傷知情文本Creating Trauma informed Strength based Classroom_compressed.pdf"
-
+# --- 4. 自動讀取教材 (升級：讀取倉庫內所有 PDF) ---
 if not st.session_state.loaded_text:
-    file_path = os.path.join('.', TARGET_FILENAME)
-    if os.path.exists(file_path):
-        with st.spinner(f"📚 系統正在讀取教材..."):
+    combined_text = ""
+    pdf_files = glob.glob("*.pdf") # 自動尋找所有 PDF 檔案
+    
+    if pdf_files:
+        with st.spinner(f"📚 系統正在內化 {len(pdf_files)} 份教材..."):
             try:
-                reader = PdfReader(file_path)
-                full_text = ""
-                for page in reader.pages:
-                    text = page.extract_text()
-                    if text: full_text += text + "\n"
-                st.session_state.loaded_text = full_text
-            except: st.error("❌ 教材讀取失敗")
+                for filename in pdf_files:
+                    reader = PdfReader(filename)
+                    for page in reader.pages:
+                        text = page.extract_text()
+                        if text: combined_text += text + "\n"
+                st.session_state.loaded_text = combined_text
+            except Exception as e:
+                st.error(f"❌ 教材讀取失敗: {e}")
+    else:
+        st.warning("⚠️ 倉庫中找不到 PDF 檔案，請確認已上傳教材。")
 
 # --- 5. 隨機劇本生成器 ---
 def generate_random_persona(grade):
@@ -78,65 +83,73 @@ def generate_random_persona(grade):
     responses = ["戰 (Fight) - 頂嘴/憤怒", "逃 (Flight) - 逃避", "凍結 (Freeze) - 呆滯", "討好 (Fawn) - 過度道歉"]
     return {
         "name": random.choice(names),
-        "background": random.choice(backgrounds),
-        "trigger": random.choice(triggers),
-        "response_mode": random.choice(responses),
-        "grade": grade
-    }
+        "background": random.choice(backgrounds),<br>        "trigger": random.choice(triggers),<br>        "response_mode": random.choice(responses),<br>        "grade": grade<br>    }
 
 # --- 6. 模擬器主畫面 ---
 st.title("🛡️ 創傷知情模擬器")
 
-if st.session_state.loaded_text:
-    if valid_model_name and api_key:
-        model = genai.GenerativeModel(
-            model_name=valid_model_name,
-            safety_settings={
-                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-            }
-        )
+if st.session_state.loaded_text and api_key and valid_model_name:
+    model = genai.GenerativeModel(
+        model_name=valid_model_name,
+        safety_settings={
+            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+        }
+    )
 
-        # A. 開始按鈕
-        if len(st.session_state.history) == 0:
-            if st.button("🎲 隨機生成案例並開始演練", type="primary"):
-                persona = generate_random_persona(student_grade)
-                st.session_state.current_persona = persona
-                sys_prompt = f"Role: Student {persona['name']} in {persona['grade']}. Mode: {persona['response_mode']}. Guide: {st.session_state.loaded_text[:20000]}"
-                st.session_state.chat_session = model.start_chat(history=[{"role":"user","parts":[sys_prompt]},{"role":"model","parts":["Ready."]}])
-                resp = st.session_state.chat_session.send_message("Action: Start.")
-                st.session_state.history.append({"role": "student", "content": resp.text})
-                st.rerun()
-
-        # B. 顯示對話與側邊欄功能
-        for msg in st.session_state.history:
-            with st.chat_message(msg["role"]):
-                st.write(msg["content"])
-
-        if user_in := st.chat_input("老師回應..."):
-            st.session_state.history.append({"role": "teacher", "content": user_in})
-            resp = st.session_state.chat_session.send_message(user_in)
-            st.session_state.history.append({"role": "student", "content": resp.text})
+    # A. 開始按鈕
+    if len(st.session_state.history) == 0:
+        if st.button("🎲 隨機生成案例並開始演練", type="primary"):
+            persona = generate_random_persona(student_grade)
+            st.session_state.current_persona = persona
+            
+            # 系統 Prompt 加入完整文本作為大腦基礎
+            sys_prompt = f"""
+            Role: You are a {persona['grade']} student named {persona['name']}. 
+            Your trauma background: {persona['background']}. 
+            Your current trigger: {persona['trigger']}.
+            Your response mode: {persona['response_mode']}.
+            
+            Professional Knowledge Base: {st.session_state.loaded_text[:25000]}
+            
+            Instruction: 
+            1. Respond naturally based on your response mode ({persona['response_mode']}).
+            2. Language: {lang}.
+            3. Stay in character. Do not explain you are an AI.
+            """
+            st.session_state.chat_session = model.start_chat(history=[{"role":"user","parts":[sys_prompt]},{"role":"model","parts":["Ready."]}])
+            resp = st.session_state.chat_session.send_message("Action: Start.")
+            st.session_state.history.append({"role": "assistant", "content": resp.text})
             st.rerun()
 
-# --- 7. 下載功能區 (放置於側邊欄最下方) ---
+    # B. 顯示對話紀錄
+    for msg in st.session_state.history:
+        role = "assistant" if msg["role"] == "assistant" else "user"
+        with st.chat_message(role):
+            st.write(msg["content"])
+
+    if user_in := st.chat_input("老師回應..."):
+        st.session_state.history.append({"role": "user", "content": user_in})
+        try:
+            resp = st.session_state.chat_session.send_message(user_in)
+            st.session_state.history.append({"role": "assistant", "content": resp.text})
+            st.rerun()
+        except Exception as e:
+            st.error(f"❌ 發生錯誤: {e}")
+
+# --- 7. 下載功能區 ---
 st.sidebar.markdown("---")
 if st.session_state.history:
     st.sidebar.subheader("💾 紀錄保存")
-    
-    # 將對話紀錄轉換為 DataFrame
     df = pd.DataFrame(st.session_state.history)
     df['nickname'] = st.session_state.user_nickname
     df['time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    # 轉換成 CSV
     csv = df.to_csv(index=False).encode('utf-8-sig')
     
     st.sidebar.download_button(
         label="📥 下載對話紀錄 (CSV)",
         data=csv,
-        file_name=f"對話紀錄_{st.session_state.user_nickname}.csv",
+        file_name=f"模擬器紀錄_{st.session_state.user_nickname}.csv",
         mime="text/csv"
     )
-    st.sidebar.caption("💡 課程結束前請記得下載保存您的演練內容。")
