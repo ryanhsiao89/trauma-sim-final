@@ -1,158 +1,139 @@
 import streamlit as st
-import os
-import random
-import glob
-import pandas as pd
-from datetime import datetime
-from pypdf import PdfReader
 import google.generativeai as genai
-from google.generativeai.types import HarmCategory, HarmBlockThreshold
+import random
+from datetime import datetime
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
 # --- 1. 系統設定 ---
-st.set_page_config(page_title="創傷知情模擬器 (全文本升級版)", layout="wide")
+st.set_page_config(page_title="創傷知情模擬器 (研究版)", layout="wide")
 
-# 初始化 Session State
+# 設定通行碼
+ACCESS_CODE = "TIC2025" 
+
+if "auth" not in st.session_state: st.session_state.auth = False
 if "history" not in st.session_state: st.session_state.history = []
-if "loaded_text" not in st.session_state: st.session_state.loaded_text = ""
 if "user_nickname" not in st.session_state: st.session_state.user_nickname = ""
-if "current_persona" not in st.session_state: st.session_state.current_persona = {}
+if "start_time" not in st.session_state: st.session_state.start_time = datetime.now()
+# 模擬器專用：保存學生設定，避免重新整理後消失
+if "student_persona" not in st.session_state: st.session_state.student_persona = ""
 
-# --- 2. 登入區 ---
-if not st.session_state.user_nickname:
-    st.title("🛡️ 歡迎來到創傷知情模擬器")
-    st.info("請輸入您的暱稱 (Nickname) 以開始練習。")
-    nickname_input = st.text_input("請輸入暱稱：", placeholder="例如：Teacher_A...")
-    if st.button("🚀 進入系統"):
-        if nickname_input.strip():
-            st.session_state.user_nickname = nickname_input
+# --- 2. Google Sheets 上傳函式 ---
+def save_to_google_sheets(nickname, chat_history):
+    try:
+        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+        creds_dict = st.secrets["gcp_service_account"]
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        client = gspread.authorize(creds)
+        
+        sheet = client.open("2025創傷知情研習數據") # 您的試算表名稱
+        worksheet = sheet.worksheet("Simulator")     # 指定寫入 Simulator 分頁
+        
+        end_time = datetime.now()
+        duration = round((end_time - st.session_state.start_time).total_seconds() / 60, 2)
+        turn_count = len([m for m in chat_history if m["role"] == "user"])
+        
+        full_conversation = f"【學生設定】: {st.session_state.student_persona}\n\n"
+        for msg in chat_history:
+            role = "AI" if msg["role"] == "model" else "User"
+            full_conversation += f"[{role}]: {msg['parts'][0]}\n"
+
+        worksheet.append_row([
+            end_time.strftime("%Y-%m-%d %H:%M:%S"),
+            nickname,
+            duration,
+            turn_count,
+            full_conversation
+        ])
+        return True
+    except Exception as e:
+        st.error(f"上傳失敗: {str(e)}")
+        return False
+
+# --- 3. 登入畫面 ---
+if not st.session_state.auth:
+    st.title("🛡️ 創傷知情模擬演練")
+    st.info("請輸入通行碼以開始演練。")
+    col1, col2 = st.columns(2)
+    with col1:
+        pass_input = st.text_input("通行碼", type="password")
+    with col2:
+        nick_input = st.text_input("您的暱稱")
+        
+    if st.button("登入系統"):
+        if pass_input == ACCESS_CODE and nick_input.strip():
+            st.session_state.auth = True
+            st.session_state.user_nickname = nick_input
             st.rerun()
         else:
-            st.error("❌ 暱稱不能為空！")
+            st.error("❌ 通行碼錯誤")
     st.stop()
 
-# --- 3. 側邊欄設定 ---
-st.sidebar.title(f"👤 學員: {st.session_state.user_nickname}")
+# --- 4. 主程式 ---
+st.sidebar.title(f"👤 {st.session_state.user_nickname}")
 st.sidebar.markdown("---")
 
-# 強制顯示輸入框，解決資源耗盡問題
-st.sidebar.warning("🔑 請輸入您自己的 Gemini API Key 以開始演練")
-api_key = st.sidebar.text_input("在此貼上您的 API Key", type="password")
-
-if not api_key:
-    st.info("💡 提示：請先在側邊欄輸入 API Key，否則系統無法運作。")
-    st.stop() 
-    
-# 自動偵測模型
-valid_model_name = None
-if api_key:
-    try:
-        genai.configure(api_key=api_key)
-        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        if available_models:
-            valid_model_name = st.sidebar.selectbox("🤖 AI 模型", available_models)
-    except: 
-        st.sidebar.error("❌ API Key 無效")
-
-student_grade = st.sidebar.selectbox("學生年級", ["國小", "國中", "高中"])
-lang = st.sidebar.selectbox("語言", ["繁體中文", "粵語", "English"])
-
-# --- 4. 自動讀取教材 (升級：讀取倉庫內所有 PDF) ---
-if not st.session_state.loaded_text:
-    combined_text = ""
-    pdf_files = glob.glob("*.pdf")
-    
-    if pdf_files:
-        with st.spinner(f"📚 系統正在內化 {len(pdf_files)} 份教材..."):
-            try:
-                for filename in pdf_files:
-                    reader = PdfReader(filename)
-                    for page in reader.pages:
-                        text = page.extract_text()
-                        if text: combined_text += text + "\n"
-                st.session_state.loaded_text = combined_text
-            except Exception as e:
-                st.error(f"❌ 教材讀取失敗: {e}")
+# 上傳按鈕
+st.sidebar.markdown("### ☁️ 結束演練")
+if st.sidebar.button("📤 上傳紀錄並登出"):
+    if not st.session_state.history:
+        st.sidebar.warning("請先進行對話再上傳")
     else:
-        st.warning("⚠️ 倉庫中找不到 PDF 檔案，請確認已上傳教材。")
+        with st.spinner("正在上傳數據..."):
+            if save_to_google_sheets(st.session_state.user_nickname, st.session_state.history):
+                st.sidebar.success("✅ 上傳成功！")
+                st.session_state.history = []
+                st.session_state.student_persona = ""
+                st.session_state.auth = False
+                st.rerun()
 
-# --- 5. 隨機劇本生成器 ---
-def generate_random_persona(grade):
-    names = ["小明", "小華", "安安", "凱凱", "婷婷", "阿宏"]
-    backgrounds = ["長期被忽視", "目睹家暴", "照顧者情緒不穩", "曾受肢體暴力"]
-    triggers = ["被當眾糾正", "感覺不公平", "環境吵雜", "被誤會"]
-    responses = ["戰 (Fight) - 頂嘴/憤怒", "逃 (Flight) - 逃避", "凍結 (Freeze) - 呆滯", "討好 (Fawn) - 過度道歉"]
-    return {
-        "name": random.choice(names),
-        "background": random.choice(backgrounds),
-        "trigger": random.choice(triggers),
-        "response_mode": random.choice(responses),
-        "grade": grade
-    }
-
-# --- 6. 模擬器主畫面 ---
+# 模擬器邏輯
 st.title("🛡️ 創傷知情模擬器")
 
-if st.session_state.loaded_text and api_key and valid_model_name:
-    model = genai.GenerativeModel(
-        model_name=valid_model_name,
-        safety_settings={
-            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-        }
-    )
+# 如果還沒有產生過學生，或是歷史紀錄為空，就產生一個新學生
+if not st.session_state.student_persona:
+    scenarios = [
+        "小強，14歲，上課常趴睡，叫醒會暴怒。背景：長期目睹家暴，睡眠不足。",
+        "小美，10歲，過度焦慮，作業沒寫完會哭泣發抖。背景：主要照顧者要求極高，有以愛為名的情緒勒索。",
+        "阿偉，16歲，冷漠抗拒，對老師的關心說『不用你管』。背景：多次被信任的大人背叛，習得無助。"
+    ]
+    st.session_state.student_persona = random.choice(scenarios)
+    # 初始化對話
+    st.session_state.history = [
+        {"role": "user", "parts": [f"你現在扮演一位有創傷背景的學生：{st.session_state.student_persona}。請用第一人稱與我對話，剛開始你會表現出防衛或退縮，直到我運用創傷知情技巧建立連結。請不要一次講太多話，反應要像真實學生。"]},
+        {"role": "model", "parts": ["好的，我現在是這個學生。老師，你找我幹嘛？我只是趴著休息一下而已..."]}
+    ]
 
-    # A. 開始按鈕
-    if len(st.session_state.history) == 0:
-        if st.button("🎲 隨機生成案例並開始演練", type="primary"):
-            persona = generate_random_persona(student_grade)
-            st.session_state.current_persona = persona
-            
-            sys_prompt = f"""
-            Role: You are a {persona['grade']} student named {persona['name']}. 
-            Your trauma background: {persona['background']}. 
-            Your current trigger: {persona['trigger']}.
-            Your response mode: {persona['response_mode']}.
-            
-            Professional Knowledge Base: {st.session_state.loaded_text[:25000]}
-            
-            Instruction: 
-            1. Respond naturally based on your response mode ({persona['response_mode']}).
-            2. Language: {lang}.
-            3. Stay in character. Do not explain you are an AI.
-            """
-            st.session_state.chat_session = model.start_chat(history=[{"role":"user","parts":[sys_prompt]},{"role":"model","parts":["Ready."]}])
-            resp = st.session_state.chat_session.send_message("Action: Start.")
-            st.session_state.history.append({"role": "assistant", "content": resp.text})
-            st.rerun()
+# 顯示學生背景
+st.info(f"🎭 當前演練對象：{st.session_state.student_persona}")
 
-    # B. 顯示對話紀錄
-    for msg in st.session_state.history:
-        role = "assistant" if msg["role"] == "assistant" else "user"
-        with st.chat_message(role):
-            st.write(msg["content"])
+# 顯示對話
+for msg in st.session_state.history:
+    if msg["role"] == "user" and "你現在扮演" in msg["parts"][0]: continue # 隱藏系統提示
+    role = "assistant" if msg["role"] == "model" else "user"
+    with st.chat_message(role):
+        st.write(msg["parts"][0])
 
-    if user_in := st.chat_input("老師回應..."):
-        st.session_state.history.append({"role": "user", "content": user_in})
-        try:
-            resp = st.session_state.chat_session.send_message(user_in)
-            st.session_state.history.append({"role": "assistant", "content": resp.text})
-            st.rerun()
-        except Exception as e:
-            st.error(f"❌ 發生錯誤: {e}")
-
-# --- 7. 下載功能區 ---
-st.sidebar.markdown("---")
-if st.session_state.history:
-    st.sidebar.subheader("💾 紀錄保存")
-    df = pd.DataFrame(st.session_state.history)
-    df['nickname'] = st.session_state.user_nickname
-    df['time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    csv = df.to_csv(index=False).encode('utf-8-sig')
-    
-    st.sidebar.download_button(
-        label="📥 下載對話紀錄 (CSV)",
-        data=csv,
-        file_name=f"模擬器紀錄_{st.session_state.user_nickname}.csv",
-        mime="text/csv"
-    )
+# 輸入框
+if prompt := st.chat_input("老師請回應..."):
+    # 讀取 Secret 裡的 Key
+    if "GEMINI_API_KEY" in st.secrets:
+        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    else:
+        st.error("找不到 API Key")
+        st.stop()
+        
+    st.session_state.history.append({"role": "user", "parts": [prompt]})
+    with st.chat_message("user"):
+        st.write(prompt)
+        
+    try:
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        chat = model.start_chat(history=st.session_state.history)
+        response = chat.send_message(prompt)
+        
+        st.session_state.history.append({"role": "model", "parts": [response.text]})
+        with st.chat_message("assistant"):
+            st.write(response.text)
+    except Exception as e:
+        st.error(f"AI 回應錯誤: {e}")
