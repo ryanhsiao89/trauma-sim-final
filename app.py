@@ -9,9 +9,46 @@ import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+from datetime import datetime
 
 # --- 1. 系統設定 ---
 st.set_page_config(page_title="創傷知情模擬器 (全文本升級版)", layout="wide")
+# --- Google Sheets 上傳函式 (研究專用) ---
+def save_to_google_sheets(user_id, chat_history):
+    try:
+        # 1. 連線設定
+        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+        creds_dict = st.secrets["gcp_service_account"]
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        client = gspread.authorize(creds)
+        
+        # 2. 開啟試算表 (請確認您的試算表名稱是否為 '2025創傷知情研習數據')
+        sheet = client.open("2025創傷知情研習數據")
+        worksheet = sheet.worksheet("Simulator") # 指定存入 'Simulator' 分頁
+        
+        # 3. 整理數據
+        # 嘗試抓取當前的學生案例 (如果有)
+        scenario = st.session_state.get("student_persona", "未記錄")
+        
+        # 整理對話內容
+        full_conversation = f"【演練案例】：{scenario}\n\n"
+        for msg in chat_history:
+            role = msg.get("role", "Unknown")
+            # 兼容不同格式的內容讀取
+            content = ""
+            if "parts" in msg:
+                content = msg["parts"][0] if isinstance(msg["parts"], list) else str(msg["parts"])
+            elif "content" in msg:
+                content = msg["content"]
+            full_conversation += f"[{role}]: {content}\n"
+
+        # 4. 寫入一行：[時間, 編號, 對話內容]
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        worksheet.append_row([current_time, user_id, full_conversation])
+        return True
+    except Exception as e:
+        st.error(f"上傳失敗，請截圖告知研究人員: {e}")
+        return False
 
 # 初始化 Session State
 if "history" not in st.session_state: st.session_state.history = []
@@ -37,6 +74,20 @@ if not st.session_state.user_nickname:
 # --- 3. 側邊欄設定 ---
 st.sidebar.title(f"👤 學員: {st.session_state.user_nickname}")
 st.sidebar.markdown("---")
+st.sidebar.markdown("### 📤 結束練習")
+if st.sidebar.button("上傳紀錄並登出"):
+    # 確保有對話才上傳
+    if not st.session_state.history:
+        st.sidebar.warning("還沒有對話紀錄喔！")
+    else:
+        with st.spinner("正在上傳數據至雲端..."):
+            # 這裡會抓取您剛剛設定的 user_nickname (也就是編號)
+            if save_to_google_sheets(st.session_state.user_nickname, st.session_state.history):
+                st.sidebar.success("✅ 上傳成功！感謝您的參與。")
+                # 清空資料並重整
+                st.session_state.history = []
+                st.session_state.auth = False # 如果您有做登入狀態控制
+                st.rerun()
 
 # 強制顯示輸入框，解決資源耗盡問題
 st.sidebar.warning("🔑 請輸入您自己的 Gemini API Key 以開始演練")
