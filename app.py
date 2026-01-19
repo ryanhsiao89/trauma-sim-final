@@ -22,14 +22,16 @@ if "current_persona" not in st.session_state: st.session_state.current_persona =
 # --- 2. 登入區 ---
 if not st.session_state.user_nickname:
     st.title("🛡️ 歡迎來到創傷知情模擬器")
-    st.info("請輸入您的暱稱 (Nickname) 以開始練習。")
-    nickname_input = st.text_input("請輸入暱稱：", placeholder="例如：Teacher_A...")
+    st.info("請輸入您的研究編號 (ID) 以開始練習。") 
+    # 下面這行改了提示文字，但變數名稱維持不變，確保系統穩定
+    nickname_input = st.text_input("請輸入您的編號：", placeholder="例如：001, 002...") 
+    
     if st.button("🚀 進入系統"):
         if nickname_input.strip():
             st.session_state.user_nickname = nickname_input
             st.rerun()
         else:
-            st.error("❌ 暱稱不能為空！")
+            st.error("❌ 編號不能為空！")
     st.stop()
 
 # --- 3. 側邊欄設定 ---
