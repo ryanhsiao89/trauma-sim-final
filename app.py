@@ -13,6 +13,19 @@ from datetime import datetime
 
 # --- 1. 系統設定 ---
 st.set_page_config(page_title="創傷知情模擬器 (全文本升級版)", layout="wide")
+# --- 0. 檢查是否剛登出 (新增這段) ---
+if st.session_state.get("logout_triggered"):
+    st.markdown("## ✅ 已成功登出")
+    st.success("您的對話紀錄已安全上傳至雲端。感謝您的參與！")
+    st.write("如果您需要再次練習，請點擊下方按鈕。")
+    
+    if st.button("🔄 重新登入"):
+        # 清除登出標記，讓系統回到初始狀態
+        st.session_state.logout_triggered = False
+        st.rerun()
+    
+    # 重要：在這裡停止程式，不讓它繼續往下跑去顯示登入畫面
+    st.stop()
 # --- Google Sheets 上傳函式 (研究旗艦版) ---
 def save_to_google_sheets(user_id, chat_history):
     try:
@@ -108,11 +121,18 @@ if st.sidebar.button("上傳紀錄並登出"):
     else:
         with st.spinner("正在上傳數據至雲端..."):
             # 這裡會抓取您剛剛設定的 user_nickname (也就是編號)
+# 執行上傳
             if save_to_google_sheets(st.session_state.user_nickname, st.session_state.history):
-                st.sidebar.success("✅ 上傳成功！感謝您的參與。")
-                # 清空資料並重整
-                st.session_state.history = []
-                st.session_state.auth = False # 如果您有做登入狀態控制
+                st.sidebar.success("✅ 上傳成功！")
+                time.sleep(1) # 稍微停頓一下
+                
+                # 1. 先清空所有狀態 (包含編號、對話紀錄)
+                st.session_state.clear()
+                
+                # 2. 留下一個「已登出」的記號 (這是關鍵！)
+                st.session_state.logout_triggered = True
+                
+                # 3. 重新整理 (這時程式會重跑，並被步驟1攔截，顯示登出畫面)
                 st.rerun()
 
 # 強制顯示輸入框，解決資源耗盡問題
