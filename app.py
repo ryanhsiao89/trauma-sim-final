@@ -128,7 +128,7 @@ if prompt := st.chat_input("老師請回應..."):
         st.write(prompt)
         
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model = genai.GenerativeModel("gemini-pro")
         chat = model.start_chat(history=st.session_state.history)
         response = chat.send_message(prompt)
         
