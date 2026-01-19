@@ -13,7 +13,7 @@ from datetime import datetime
 
 # --- 1. 系統設定 ---
 st.set_page_config(page_title="創傷知情模擬器 (全文本升級版)", layout="wide")
-# --- 0. 檢查是否剛登出 (新增這段) ---
+# --- 0. 檢查是否剛登出 ---
 if st.session_state.get("logout_triggered"):
     st.markdown("## ✅ 已成功登出")
     st.success("您的對話紀錄已安全上傳至雲端。感謝您的參與！")
@@ -24,7 +24,7 @@ if st.session_state.get("logout_triggered"):
         st.session_state.logout_triggered = False
         st.rerun()
     
-    # 重要：在這裡停止程式，不讓它繼續往下跑去顯示登入畫面
+    # 這一行 st.stop() 必須跟上面的 st.markdown 對齊 (縮排 4 格)
     st.stop()
 # --- Google Sheets 上傳函式 (研究旗艦版) ---
 def save_to_google_sheets(user_id, chat_history):
