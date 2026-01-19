@@ -121,25 +121,30 @@ if not st.session_state.user_nickname:
 st.sidebar.title(f"👤 學員: {st.session_state.user_nickname}")
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 📤 結束練習")
+
 if st.sidebar.button("上傳紀錄並登出"):
-    # 確保有對話才上傳
+    # 1. 檢查有沒有對話紀錄
     if not st.session_state.history:
         st.sidebar.warning("還沒有對話紀錄喔！")
     else:
         with st.spinner("正在上傳數據至雲端..."):
-            # 這裡會抓取您剛剛設定的 user_nickname (也就是編號)
-# 執行上傳
+            # 2. 執行上傳
             if save_to_google_sheets(st.session_state.user_nickname, st.session_state.history):
                 st.sidebar.success("✅ 上傳成功！")
-                time.sleep(1) # 稍微停頓一下
+                time.sleep(1) 
+
+                # --- 關鍵修改區：手動清除資料 ---
                 
-                # 1. 先清空所有狀態 (包含編號、對話紀錄)
-                st.session_state.clear()
+                # 3. 指定要刪除的變數 (比 clear() 更保險，不會誤刪登出記號)
+                keys_to_clear = ["user_nickname", "history", "student_persona", "start_time"]
+                for key in keys_to_clear:
+                    if key in st.session_state:
+                        del st.session_state[key]
                 
-                # 2. 留下一個「已登出」的記號 (這是關鍵！)
+                # 4. 設定登出記號 (這是讓您看到「已登出」畫面的關鍵)
                 st.session_state.logout_triggered = True
                 
-                # 3. 重新整理 (這時程式會重跑，並被步驟1攔截，顯示登出畫面)
+                # 5. 重新整理
                 st.rerun()
 
 # 強制顯示輸入框，解決資源耗盡問題
