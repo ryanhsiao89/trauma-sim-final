@@ -7,6 +7,8 @@ from datetime import datetime
 from pypdf import PdfReader
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
 # --- 1. 系統設定 ---
 st.set_page_config(page_title="創傷知情模擬器 (全文本升級版)", layout="wide")
