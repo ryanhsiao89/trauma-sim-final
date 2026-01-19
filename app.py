@@ -3,17 +3,18 @@ import os
 import random
 import glob
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta # 確保引入 timedelta
 from pypdf import PdfReader
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from datetime import datetime
+import time # 確保引入 time
 
 # --- 1. 系統設定 ---
 st.set_page_config(page_title="創傷知情模擬器 (全文本升級版)", layout="wide")
-# --- 0. 檢查是否剛登出 ---
+
+# --- 0. 檢查是否剛登出 (放在最前面攔截) ---
 if st.session_state.get("logout_triggered"):
     st.markdown("## ✅ 已成功登出")
     st.success("您的對話紀錄已安全上傳至雲端。感謝您的參與！")
@@ -24,8 +25,9 @@ if st.session_state.get("logout_triggered"):
         st.session_state.logout_triggered = False
         st.rerun()
     
-    # 這一行 st.stop() 必須跟上面的 st.markdown 對齊 (縮排 4 格)
+    # 停止執行，不顯示下方的登入畫面
     st.stop()
+
 # --- Google Sheets 上傳函式 (研究旗艦版) ---
 def save_to_google_sheets(user_id, chat_history):
     try:
@@ -53,8 +55,8 @@ def save_to_google_sheets(user_id, chat_history):
         duration_mins = round((end_t - start_t).total_seconds() / 60, 2)
         
         # D. 計算累積次數 (讀取 C 欄「學員編號」來計算)
-        # 注意：如果您的編號不在第3欄(Col C)，這裡的 col_values(3) 要改
         try:
+            # 注意：如果您的編號在第3欄(Col C)，這裡是 col_values(3)
             all_ids = worksheet.col_values(3) 
             # 計算這個 user_id 出現過幾次，然後 +1 (這次)
             login_count = all_ids.count(user_id) + 1
@@ -62,8 +64,10 @@ def save_to_google_sheets(user_id, chat_history):
             login_count = 1 # 如果讀取失敗，當作第1次
 
         # 3. 整理對話內容
-        scenario = st.session_state.get("student_persona", "未記錄")
-        full_conversation = f"【演練案例】：{scenario}\n\n"
+        scenario = st.session_state.get("current_persona", {})
+        scenario_str = f"角色:{scenario.get('name','未知')}/觸發:{scenario.get('trigger','未知')}"
+        
+        full_conversation = f"【演練案例】：{scenario_str}\n\n"
         for msg in chat_history:
             role = msg.get("role", "Unknown")
             content = ""
@@ -92,13 +96,15 @@ if "history" not in st.session_state: st.session_state.history = []
 if "loaded_text" not in st.session_state: st.session_state.loaded_text = ""
 if "user_nickname" not in st.session_state: st.session_state.user_nickname = ""
 if "current_persona" not in st.session_state: st.session_state.current_persona = {}
+# 確保 start_time 被初始化，避免報錯
+if "start_time" not in st.session_state: st.session_state.start_time = datetime.now()
 
 # --- 2. 登入區 ---
 if not st.session_state.user_nickname:
     st.title("🛡️ 歡迎來到創傷知情模擬器")
     st.info("請輸入您的研究編號 (ID) 以開始練習。")
     
-    # 1. 建立輸入框 (這行非常重要，一定要在按鈕之前！)
+    # 1. 建立輸入框
     nickname_input = st.text_input("請輸入您的編號：", placeholder="例如：001, 002...") 
     
     # 2. 建立登入按鈕
@@ -106,15 +112,14 @@ if not st.session_state.user_nickname:
         if nickname_input.strip():
             # A. 儲存編號
             st.session_state.user_nickname = nickname_input
-            # B. 記錄開始時間 (這是我們後來加的)
+            # B. 記錄開始時間
             st.session_state.start_time = datetime.now()
             # C. 重新整理頁面
             st.rerun()
         else:
             st.error("❌ 編號不能為空！")
 
-    # 3. 停止執行 (確保未登入時，不會跑下面的程式碼)
-    # 這一行必須縮排 4 格，跟上面的 if st.button 對齊
+    # 3. 停止執行
     st.stop()
 
 # --- 3. 側邊欄設定 ---
@@ -133,21 +138,20 @@ if st.sidebar.button("上傳紀錄並登出"):
                 st.sidebar.success("✅ 上傳成功！")
                 time.sleep(1) 
 
-                # --- 關鍵修改區：手動清除資料 ---
-                
-                # 3. 指定要刪除的變數 (比 clear() 更保險，不會誤刪登出記號)
-                keys_to_clear = ["user_nickname", "history", "student_persona", "start_time"]
+                # 3. 指定要刪除的變數 (保留系統必要的，刪除使用者資料)
+                keys_to_clear = ["user_nickname", "history", "current_persona", "start_time", "chat_session"]
                 for key in keys_to_clear:
                     if key in st.session_state:
                         del st.session_state[key]
                 
-                # 4. 設定登出記號 (這是讓您看到「已登出」畫面的關鍵)
+                # 4. 設定登出記號
                 st.session_state.logout_triggered = True
                 
                 # 5. 重新整理
                 st.rerun()
 
 # 強制顯示輸入框，解決資源耗盡問題
+st.sidebar.markdown("---")
 st.sidebar.warning("🔑 請輸入您自己的 Gemini API Key 以開始演練")
 api_key = st.sidebar.text_input("在此貼上您的 API Key", type="password")
 
