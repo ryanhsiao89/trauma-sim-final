@@ -13,28 +13,46 @@ from datetime import datetime
 
 # --- 1. 系統設定 ---
 st.set_page_config(page_title="創傷知情模擬器 (全文本升級版)", layout="wide")
-# --- Google Sheets 上傳函式 (研究專用) ---
+# --- Google Sheets 上傳函式 (研究旗艦版) ---
 def save_to_google_sheets(user_id, chat_history):
     try:
-        # 1. 連線設定
+        # 1. 連線與設定
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         creds_dict = st.secrets["gcp_service_account"]
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
         
-        # 2. 開啟試算表 (請確認您的試算表名稱是否為 '2025創傷知情研習數據')
         sheet = client.open("2025創傷知情研習數據")
-        worksheet = sheet.worksheet("Simulator") # 指定存入 'Simulator' 分頁
+        worksheet = sheet.worksheet("Simulator")
         
-        # 3. 整理數據
-        # 嘗試抓取當前的學生案例 (如果有)
+        # 2. 時間計算 (全部校正為台灣時間 UTC+8)
+        tw_fix = timedelta(hours=8)
+        
+        # A. 取得登入時間 (如果沒抓到，就用現在)
+        start_t = st.session_state.get('start_time', datetime.now())
+        login_str = (start_t + tw_fix).strftime("%Y-%m-%d %H:%M:%S")
+        
+        # B. 取得登出時間 (就是現在)
+        end_t = datetime.now()
+        logout_str = (end_t + tw_fix).strftime("%Y-%m-%d %H:%M:%S")
+        
+        # C. 計算使用分鐘數 (Python 直接算，精準到小數點下2位)
+        duration_mins = round((end_t - start_t).total_seconds() / 60, 2)
+        
+        # D. 計算累積次數 (讀取 C 欄「學員編號」來計算)
+        # 注意：如果您的編號不在第3欄(Col C)，這裡的 col_values(3) 要改
+        try:
+            all_ids = worksheet.col_values(3) 
+            # 計算這個 user_id 出現過幾次，然後 +1 (這次)
+            login_count = all_ids.count(user_id) + 1
+        except:
+            login_count = 1 # 如果讀取失敗，當作第1次
+
+        # 3. 整理對話內容
         scenario = st.session_state.get("student_persona", "未記錄")
-        
-        # 整理對話內容
         full_conversation = f"【演練案例】：{scenario}\n\n"
         for msg in chat_history:
             role = msg.get("role", "Unknown")
-            # 兼容不同格式的內容讀取
             content = ""
             if "parts" in msg:
                 content = msg["parts"][0] if isinstance(msg["parts"], list) else str(msg["parts"])
@@ -42,12 +60,18 @@ def save_to_google_sheets(user_id, chat_history):
                 content = msg["content"]
             full_conversation += f"[{role}]: {content}\n"
 
-        # 4. 寫入一行：[時間, 編號, 對話內容]
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        worksheet.append_row([current_time, user_id, full_conversation])
+        # 4. 寫入六大欄位：[登入, 登出, 編號, 分鐘數, 次數, 內容]
+        worksheet.append_row([
+            login_str, 
+            logout_str, 
+            user_id, 
+            duration_mins, 
+            login_count, 
+            full_conversation
+        ])
         return True
     except Exception as e:
-        st.error(f"上傳失敗，請截圖告知研究人員: {e}")
+        st.error(f"上傳失敗: {e}")
         return False
 
 # 初始化 Session State
@@ -63,9 +87,11 @@ if not st.session_state.user_nickname:
     # 下面這行改了提示文字，但變數名稱維持不變，確保系統穩定
     nickname_input = st.text_input("請輸入您的編號：", placeholder="例如：001, 002...") 
     
-    if st.button("🚀 進入系統"):
+if st.button("🚀 進入系統"):
         if nickname_input.strip():
             st.session_state.user_nickname = nickname_input
+            # --- 新增：按下登入時，記錄現在時間 ---
+            st.session_state.start_time = datetime.now()
             st.rerun()
         else:
             st.error("❌ 編號不能為空！")
