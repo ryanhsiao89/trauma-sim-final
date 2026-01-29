@@ -3,16 +3,17 @@ import os
 import random
 import glob
 import pandas as pd
-from datetime import datetime, timedelta # 確保引入 timedelta
+import json
+from datetime import datetime, timedelta
 from pypdf import PdfReader
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-import time # 確保引入 time
+import time
 
 # --- 1. 系統設定 ---
-st.set_page_config(page_title="創傷知情模擬器 (全文本升級版)", layout="wide")
+st.set_page_config(page_title="創傷知情模擬器 (研究完全版)", layout="wide")
 
 # --- 0. 檢查是否剛登出 (放在最前面攔截) ---
 if st.session_state.get("logout_triggered"):
@@ -21,51 +22,40 @@ if st.session_state.get("logout_triggered"):
     st.write("如果您需要再次練習，請點擊下方按鈕。")
     
     if st.button("🔄 重新登入"):
-        # 清除登出標記，讓系統回到初始狀態
         st.session_state.logout_triggered = False
         st.rerun()
-    
-    # 停止執行，不顯示下方的登入畫面
     st.stop()
 
-# --- Google Sheets 上傳函式 (研究旗艦版) ---
+# --- Google Sheets 上傳函式 ---
 def save_to_google_sheets(user_id, chat_history):
     try:
-        # 1. 連線與設定
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         creds_dict = st.secrets["gcp_service_account"]
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
         
-        sheet = client.open("2025創傷知情研習數據")
+        # 請確認檔名 (研習 vs 研究)
+        sheet = client.open("2025創傷知情研究數據") 
         worksheet = sheet.worksheet("Simulator")
         
-        # 2. 時間計算 (全部校正為台灣時間 UTC+8)
         tw_fix = timedelta(hours=8)
-        
-        # A. 取得登入時間 (如果沒抓到，就用現在)
         start_t = st.session_state.get('start_time', datetime.now())
         login_str = (start_t + tw_fix).strftime("%Y-%m-%d %H:%M:%S")
-        
-        # B. 取得登出時間 (就是現在)
         end_t = datetime.now()
         logout_str = (end_t + tw_fix).strftime("%Y-%m-%d %H:%M:%S")
-        
-        # C. 計算使用分鐘數 (Python 直接算，精準到小數點下2位)
         duration_mins = round((end_t - start_t).total_seconds() / 60, 2)
         
-        # D. 計算累積次數 (讀取 C 欄「學員編號」來計算)
         try:
-            # 注意：如果您的編號在第3欄(Col C)，這裡是 col_values(3)
             all_ids = worksheet.col_values(3) 
-            # 計算這個 user_id 出現過幾次，然後 +1 (這次)
             login_count = all_ids.count(user_id) + 1
         except:
-            login_count = 1 # 如果讀取失敗，當作第1次
+            login_count = 1
 
-        # 3. 整理對話內容
+        # 整理情境資訊 (包含進階設定)
         scenario = st.session_state.get("current_persona", {})
-        scenario_str = f"角色:{scenario.get('name','未知')}/觸發:{scenario.get('trigger','未知')}"
+        basic_info = f"角色:{scenario.get('name','未知')}/觸發:{scenario.get('trigger','未知')}"
+        adv_info = f"第{scenario.get('session_num',1)}次/關係:{scenario.get('relation','未知')}/前情:{scenario.get('recent_event','無')}"
+        scenario_str = f"{basic_info} | {adv_info}"
         
         full_conversation = f"【演練案例】：{scenario_str}\n\n"
         for msg in chat_history:
@@ -77,7 +67,6 @@ def save_to_google_sheets(user_id, chat_history):
                 content = msg["content"]
             full_conversation += f"[{role}]: {content}\n"
 
-        # 4. 寫入六大欄位：[登入, 登出, 編號, 分鐘數, 次數, 內容]
         worksheet.append_row([
             login_str, 
             logout_str, 
@@ -96,30 +85,22 @@ if "history" not in st.session_state: st.session_state.history = []
 if "loaded_text" not in st.session_state: st.session_state.loaded_text = ""
 if "user_nickname" not in st.session_state: st.session_state.user_nickname = ""
 if "current_persona" not in st.session_state: st.session_state.current_persona = {}
-# 確保 start_time 被初始化，避免報錯
 if "start_time" not in st.session_state: st.session_state.start_time = datetime.now()
+if "chat_session_initialized" not in st.session_state: st.session_state.chat_session_initialized = False
 
 # --- 2. 登入區 ---
 if not st.session_state.user_nickname:
     st.title("🛡️ 歡迎來到創傷知情模擬器")
     st.info("請輸入您的研究編號 (ID) 以開始練習。")
-    
-    # 1. 建立輸入框
     nickname_input = st.text_input("請輸入您的編號：", placeholder="例如：001, 002...") 
     
-    # 2. 建立登入按鈕
     if st.button("🚀 進入系統"):
         if nickname_input.strip():
-            # A. 儲存編號
             st.session_state.user_nickname = nickname_input
-            # B. 記錄開始時間
             st.session_state.start_time = datetime.now()
-            # C. 重新整理頁面
             st.rerun()
         else:
             st.error("❌ 編號不能為空！")
-
-    # 3. 停止執行
     st.stop()
 
 # --- 3. 側邊欄設定 ---
@@ -128,29 +109,20 @@ st.sidebar.markdown("---")
 st.sidebar.markdown("### 📤 結束練習")
 
 if st.sidebar.button("上傳紀錄並登出"):
-    # 1. 檢查有沒有對話紀錄
     if not st.session_state.history:
         st.sidebar.warning("還沒有對話紀錄喔！")
     else:
         with st.spinner("正在上傳數據至雲端..."):
-            # 2. 執行上傳
             if save_to_google_sheets(st.session_state.user_nickname, st.session_state.history):
                 st.sidebar.success("✅ 上傳成功！")
                 time.sleep(1) 
-
-                # 3. 指定要刪除的變數 (保留系統必要的，刪除使用者資料)
-                keys_to_clear = ["user_nickname", "history", "current_persona", "start_time", "chat_session"]
+                keys_to_clear = ["user_nickname", "history", "current_persona", "start_time", "chat_session", "chat_session_initialized"]
                 for key in keys_to_clear:
                     if key in st.session_state:
                         del st.session_state[key]
-                
-                # 4. 設定登出記號
                 st.session_state.logout_triggered = True
-                
-                # 5. 重新整理
                 st.rerun()
 
-# 強制顯示輸入框，解決資源耗盡問題
 st.sidebar.markdown("---")
 st.sidebar.warning("🔑 請輸入您自己的 Gemini API Key 以開始演練")
 api_key = st.sidebar.text_input("在此貼上您的 API Key", type="password")
@@ -159,7 +131,6 @@ if not api_key:
     st.info("💡 提示：請先在側邊欄輸入 API Key，否則系統無法運作。")
     st.stop() 
     
-# 自動偵測模型
 valid_model_name = None
 if api_key:
     try:
@@ -170,14 +141,13 @@ if api_key:
     except: 
         st.sidebar.error("❌ API Key 無效")
 
-student_grade = st.sidebar.selectbox("學生年級", ["國小", "國中", "高中"])
+student_grade = st.sidebar.selectbox("學生年級 (新個案適用)", ["國小", "國中", "高中"])
 lang = st.sidebar.selectbox("語言", ["繁體中文", "粵語", "English"])
 
-# --- 4. 自動讀取教材 (升級：讀取倉庫內所有 PDF) ---
+# --- 4. 自動讀取教材 ---
 if not st.session_state.loaded_text:
     combined_text = ""
     pdf_files = glob.glob("*.pdf")
-    
     if pdf_files:
         with st.spinner(f"📚 系統正在內化 {len(pdf_files)} 份教材..."):
             try:
@@ -190,9 +160,9 @@ if not st.session_state.loaded_text:
             except Exception as e:
                 st.error(f"❌ 教材讀取失敗: {e}")
     else:
-        st.warning("⚠️ 倉庫中找不到 PDF 檔案，請確認已上傳教材。")
+        st.warning("⚠️ 倉庫中找不到 PDF 檔案。")
 
-# --- 5. 隨機劇本生成器 ---
+# --- 5. 隨機劇本生成器 (基礎資料) ---
 def generate_random_persona(grade):
     names = ["小明", "小華", "安安", "凱凱", "婷婷", "阿宏"]
     backgrounds = ["長期被忽視", "目睹家暴", "照顧者情緒不穩", "曾受肢體暴力"]
@@ -219,44 +189,143 @@ if st.session_state.loaded_text and api_key and valid_model_name:
         }
     )
 
-    # A. 開始按鈕
-    if len(st.session_state.history) == 0:
-        if st.button("🎲 隨機生成案例並開始演練", type="primary"):
-            persona = generate_random_persona(student_grade)
-            st.session_state.current_persona = persona
+    if not st.session_state.chat_session_initialized:
+        tab1, tab2 = st.tabs(["🎲 隨機生成新個案", "📂 載入舊紀錄續談"])
+        
+        # [模式一] 隨機新個案 (含進階情境設定)
+        with tab1:
+            st.markdown("### 設定演練情境")
             
-            sys_prompt = f"""
-            Role: You are a {persona['grade']} student named {persona['name']}. 
-            Your trauma background: {persona['background']}. 
-            Your current trigger: {persona['trigger']}.
-            Your response mode: {persona['response_mode']}.
-            
-            Professional Knowledge Base: {st.session_state.loaded_text[:25000]}
-            
-            Instruction: 
-            1. Respond naturally based on your response mode ({persona['response_mode']}).
-            2. Language: {lang}.
-            3. Stay in character. Do not explain you are an AI.
-            """
-            st.session_state.chat_session = model.start_chat(history=[{"role":"user","parts":[sys_prompt]},{"role":"model","parts":["Ready."]}])
-            resp = st.session_state.chat_session.send_message("Action: Start.")
-            st.session_state.history.append({"role": "assistant", "content": resp.text})
-            st.rerun()
+            # --- 新增：進階設定區塊 ---
+            with st.expander("⚙️ 進階設定：自訂晤談情境 (非必填)", expanded=False):
+                col1, col2 = st.columns(2)
+                with col1:
+                    session_num = st.slider("這是第幾次晤談？", 1, 10, 1, help="設定您與該學生的互動歷史")
+                with col2:
+                    rel_status = st.selectbox("目前的信任關係", ["初次見面 / 不熟", "建立信任中", "關係良好 / 依賴", "關係破裂 / 敵對", "冷淡 / 防衛"], index=0)
+                
+                recent_event = st.text_input("近期發生事件 / 前情提要", value="無特殊事件，日常互動。", placeholder="例如：昨晚父母吵架、今天早上考試不及格...")
+            # -------------------------
 
-    # B. 顯示對話紀錄
-    for msg in st.session_state.history:
-        role = "assistant" if msg["role"] == "assistant" else "user"
-        with st.chat_message(role):
-            st.write(msg["content"])
+            if st.button("🎲 生成案例並開始", type="primary"):
+                persona = generate_random_persona(student_grade)
+                
+                # 將進階設定存入 persona
+                persona['session_num'] = session_num
+                persona['relation'] = rel_status
+                persona['recent_event'] = recent_event
+                
+                st.session_state.current_persona = persona
+                
+                # 強化版 Prompt：注入情境設定
+                sys_prompt = f"""
+                Role: You are a {persona['grade']} student named {persona['name']}. 
+                
+                [CORE PROFILE]
+                Trauma Background: {persona['background']}. 
+                Current Trigger: {persona['trigger']}.
+                Dominant Response Mode: {persona['response_mode']}.
+                
+                [SCENARIO CONTEXT]
+                - Session Number: This is the {session_num} time you are talking to this teacher.
+                - Relationship Quality: {rel_status}.
+                - Recent Life Event: {recent_event}.
+                
+                [KNOWLEDGE BASE]
+                {st.session_state.loaded_text[:25000]}
+                
+                [INSTRUCTIONS]
+                1. Act strictly according to the 'Scenario Context'. 
+                   - If session > 1, do NOT introduce yourself like a stranger.
+                   - If relationship is bad, be guarded or hostile.
+                   - If relationship is good, show some trust but still react to the trigger.
+                2. Respond naturally based on your response mode ({persona['response_mode']}).
+                3. Language: {lang}.
+                4. Stay in character. Do not explain you are an AI.
+                """
+                
+                st.session_state.chat_session = model.start_chat(history=[{"role":"user","parts":[sys_prompt]},{"role":"model","parts":["Ready."]}])
+                
+                # AI 開場
+                start_action = "Action: Start interaction based on context."
+                resp = st.session_state.chat_session.send_message(start_action)
+                st.session_state.history.append({"role": "assistant", "content": resp.text})
+                st.session_state.chat_session_initialized = True
+                st.rerun()
+        
+        # [模式二] 載入舊檔 (續談)
+        with tab2:
+            st.markdown("### 延續之前的演練")
+            uploaded_file = st.file_uploader("請上傳上次下載的 .csv 紀錄檔", type=['csv'])
+            
+            if uploaded_file is not None:
+                try:
+                    df = pd.read_csv(uploaded_file)
+                    if 'meta_persona' in df.columns:
+                        persona_json = df['meta_persona'].iloc[0]
+                        st.session_state.current_persona = json.loads(persona_json)
+                        p = st.session_state.current_persona
+                        st.success(f"✅ 成功載入個案：{p['name']} (第{p.get('session_num','?')}次晤談)")
+                        
+                        # 還原歷史與 Prompt
+                        restored_history = []
+                        gemini_history = []
+                        
+                        sys_prompt = f"""
+                        Role: You are a {p['grade']} student named {p['name']}. 
+                        Trauma Background: {p['background']}. 
+                        Trigger: {p['trigger']}.
+                        Response Mode: {p['response_mode']}.
+                        
+                        [CONTEXT RESUMED]
+                        - Session Num: {p.get('session_num', 1)}
+                        - Relationship: {p.get('relation', 'Unknown')}
+                        - Recent Event: {p.get('recent_event', 'Unknown')}
+                        
+                        Knowledge Base: {st.session_state.loaded_text[:25000]}
+                        
+                        Instruction: Continue the conversation naturally. Language: {lang}.
+                        """
+                        gemini_history.append({"role":"user","parts":[sys_prompt]})
+                        gemini_history.append({"role":"model","parts":["Ready."]})
+                        
+                        for index, row in df.iterrows():
+                            role = row['role']
+                            content = row['content']
+                            restored_history.append({"role": role, "content": content})
+                            g_role = "model" if role == "assistant" else "user"
+                            gemini_history.append({"role": g_role, "parts": [str(content)]})
+                        
+                        st.session_state.history = restored_history
+                        st.session_state.chat_session = model.start_chat(history=gemini_history)
+                        st.session_state.chat_session_initialized = True
+                        
+                        if st.button("🚀 繼續對話"):
+                            st.rerun()
+                    else:
+                        st.error("❌ 這個 CSV 檔案不包含個案設定資料，無法用於續談。")
+                except Exception as e:
+                    st.error(f"❌ 檔案讀取失敗: {e}")
 
-    if user_in := st.chat_input("老師回應..."):
-        st.session_state.history.append({"role": "user", "content": user_in})
-        try:
-            resp = st.session_state.chat_session.send_message(user_in)
-            st.session_state.history.append({"role": "assistant", "content": resp.text})
-            st.rerun()
-        except Exception as e:
-            st.error(f"❌ 發生錯誤: {e}")
+    # C. 顯示對話
+    if st.session_state.chat_session_initialized:
+        p = st.session_state.current_persona
+        # 顯示詳細情境資訊
+        st.info(f"🎭 **演練中**：{p.get('grade')}生 **{p.get('name')}** | 第 {p.get('session_num',1)} 次晤談 | 關係：{p.get('relation','未知')} | 前情：{p.get('recent_event','無')}")
+        
+        for msg in st.session_state.history:
+            role = "assistant" if msg["role"] == "assistant" else "user"
+            with st.chat_message(role):
+                st.write(msg["content"])
+
+        if user_in := st.chat_input("老師回應..."):
+            st.session_state.history.append({"role": "user", "content": user_in})
+            try:
+                resp = st.session_state.chat_session.send_message(user_in)
+                st.session_state.history.append({"role": "assistant", "content": resp.text})
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ 發生錯誤: {e}")
 
 # --- 7. 下載功能區 ---
 st.sidebar.markdown("---")
@@ -265,11 +334,17 @@ if st.session_state.history:
     df = pd.DataFrame(st.session_state.history)
     df['nickname'] = st.session_state.user_nickname
     df['time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # 存入完整的個案設定 (含進階情境)
+    persona_json = json.dumps(st.session_state.current_persona, ensure_ascii=False)
+    df['meta_persona'] = persona_json
+    
     csv = df.to_csv(index=False).encode('utf-8-sig')
     
     st.sidebar.download_button(
-        label="📥 下載對話紀錄 (CSV)",
+        label="📥 下載對話紀錄 (含續談資料)",
         data=csv,
-        file_name=f"模擬器紀錄_{st.session_state.user_nickname}.csv",
-        mime="text/csv"
+        file_name=f"模擬器_{st.session_state.user_nickname}_{st.session_state.current_persona.get('name')}.csv",
+        mime="text/csv",
+        help="下載此檔案可保留目前的對話進度與情境設定。"
     )
