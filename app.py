@@ -45,7 +45,7 @@ def save_to_google_sheets(user_id, chat_history):
             client = gspread.authorize(creds)
             
             # 2. 開啟試算表 (請確認檔名正確)
-            sheet = client.open("2025創傷知情研究數據") 
+            sheet = client.open("2025創傷知情研習數據") 
             worksheet = sheet.worksheet("Simulator")
             
             # 3. 時間計算
