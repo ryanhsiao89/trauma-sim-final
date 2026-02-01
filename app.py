@@ -26,59 +26,80 @@ if st.session_state.get("logout_triggered"):
         st.rerun()
     st.stop()
 
-# --- Google Sheets 上傳函式 ---
+# --- Google Sheets 上傳函式 (含自動重試機制) ---
 def save_to_google_sheets(user_id, chat_history):
-    try:
-        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        creds_dict = st.secrets["gcp_service_account"]
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        client = gspread.authorize(creds)
-        
-        # 請確認檔名 (研習 vs 研究)
-        sheet = client.open("2025創傷知情研究數據") 
-        worksheet = sheet.worksheet("Simulator")
-        
-        tw_fix = timedelta(hours=8)
-        start_t = st.session_state.get('start_time', datetime.now())
-        login_str = (start_t + tw_fix).strftime("%Y-%m-%d %H:%M:%S")
-        end_t = datetime.now()
-        logout_str = (end_t + tw_fix).strftime("%Y-%m-%d %H:%M:%S")
-        duration_mins = round((end_t - start_t).total_seconds() / 60, 2)
-        
+    max_retries = 3  # 最大重試次數
+    delay = 2        # 初始等待秒數
+
+    for attempt in range(max_retries):
         try:
-            all_ids = worksheet.col_values(3) 
-            login_count = all_ids.count(user_id) + 1
-        except:
-            login_count = 1
+            # 1. 連線與設定
+            scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+            
+            # 建立新的憑證字典以避免修改原始 secrets，並處理換行符號問題
+            creds_dict = dict(st.secrets["gcp_service_account"])
+            if "private_key" in creds_dict:
+                creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+            
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+            client = gspread.authorize(creds)
+            
+            # 2. 開啟試算表 (請確認檔名正確)
+            sheet = client.open("2025創傷知情研究數據") 
+            worksheet = sheet.worksheet("Simulator")
+            
+            # 3. 時間計算
+            tw_fix = timedelta(hours=8)
+            start_t = st.session_state.get('start_time', datetime.now())
+            login_str = (start_t + tw_fix).strftime("%Y-%m-%d %H:%M:%S")
+            end_t = datetime.now()
+            logout_str = (end_t + tw_fix).strftime("%Y-%m-%d %H:%M:%S")
+            duration_mins = round((end_t - start_t).total_seconds() / 60, 2)
+            
+            # 4. 計算累積次數
+            try:
+                all_ids = worksheet.col_values(3) 
+                login_count = all_ids.count(user_id) + 1
+            except:
+                login_count = 1
 
-        # 整理情境資訊 (包含進階設定)
-        scenario = st.session_state.get("current_persona", {})
-        basic_info = f"角色:{scenario.get('name','未知')}/觸發:{scenario.get('trigger','未知')}"
-        adv_info = f"第{scenario.get('session_num',1)}次/關係:{scenario.get('relation','未知')}/前情:{scenario.get('recent_event','無')}"
-        scenario_str = f"{basic_info} | {adv_info}"
-        
-        full_conversation = f"【演練案例】：{scenario_str}\n\n"
-        for msg in chat_history:
-            role = msg.get("role", "Unknown")
-            content = ""
-            if "parts" in msg:
-                content = msg["parts"][0] if isinstance(msg["parts"], list) else str(msg["parts"])
-            elif "content" in msg:
-                content = msg["content"]
-            full_conversation += f"[{role}]: {content}\n"
+            # 5. 整理情境資訊 (包含進階設定)
+            scenario = st.session_state.get("current_persona", {})
+            basic_info = f"角色:{scenario.get('name','未知')}/觸發:{scenario.get('trigger','未知')}"
+            adv_info = f"第{scenario.get('session_num',1)}次/關係:{scenario.get('relation','未知')}/前情:{scenario.get('recent_event','無')}"
+            scenario_str = f"{basic_info} | {adv_info}"
+            
+            full_conversation = f"【演練案例】：{scenario_str}\n\n"
+            for msg in chat_history:
+                role = msg.get("role", "Unknown")
+                content = ""
+                if "parts" in msg:
+                    content = msg["parts"][0] if isinstance(msg["parts"], list) else str(msg["parts"])
+                elif "content" in msg:
+                    content = msg["content"]
+                full_conversation += f"[{role}]: {content}\n"
 
-        worksheet.append_row([
-            login_str, 
-            logout_str, 
-            user_id, 
-            duration_mins, 
-            login_count, 
-            full_conversation
-        ])
-        return True
-    except Exception as e:
-        st.error(f"上傳失敗: {e}")
-        return False
+            # 6. 寫入資料
+            worksheet.append_row([
+                login_str, 
+                logout_str, 
+                user_id, 
+                duration_mins, 
+                login_count, 
+                full_conversation
+            ])
+            
+            return True # 成功則直接回傳 True
+
+        except Exception as e:
+            # 如果失敗，檢查是否還有重試機會
+            if attempt < max_retries - 1:
+                time.sleep(delay) # 等待
+                delay *= 2        # 等待時間加倍
+                continue          # 進行下一次嘗試
+            else:
+                st.error(f"❌ 上傳失敗 (已重試{max_retries}次)，請檢查網路狀況。\n錯誤訊息: {e}")
+                return False
 
 # 初始化 Session State
 if "history" not in st.session_state: st.session_state.history = []
