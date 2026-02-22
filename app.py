@@ -63,11 +63,8 @@ def auto_save_to_google_sheets(user_id, chat_history):
             full_conversation += f"[{role}]: {content}\n"
 
         # 5. 尋找並更新，或新增一筆
-        # 我們利用 Session ID 確保同一次登入的對話會蓋掉舊的，不斷更新
         records = worksheet.get_all_records()
         row_to_update = None
-        # 尋找是否存在同一個 session_id 的紀錄 (假設我們把 session_id 藏在備註或利用時間比對)
-        # 簡單作法：比對「登入時間」和「學員編號」
         col_logins = worksheet.col_values(1) # 第一欄：登入時間
         col_ids = worksheet.col_values(3)    # 第三欄：學員編號
         
@@ -121,6 +118,8 @@ if "user_nickname" not in st.session_state: st.session_state.user_nickname = ""
 if "current_persona" not in st.session_state: st.session_state.current_persona = {}
 if "start_time" not in st.session_state: st.session_state.start_time = datetime.now()
 if "chat_session_initialized" not in st.session_state: st.session_state.chat_session_initialized = False
+# 【新增】確保 API Key 被安全記憶
+if "api_key" not in st.session_state: st.session_state.api_key = ""
 
 # --- 2. 登入區 ---
 if not st.session_state.user_nickname:
@@ -142,11 +141,11 @@ st.sidebar.title(f"👤 學員: {st.session_state.user_nickname}")
 st.sidebar.markdown("*(系統已開啟自動存檔功能)*")
 st.sidebar.markdown("---")
 
-# [新增] 返回首頁按鈕
+# 返回首頁按鈕
 if st.session_state.chat_session_initialized:
     st.sidebar.markdown("### 🏠 導覽")
     if st.sidebar.button("返回首頁 / 換個個案", type="secondary"):
-        # 清除當前對話狀態，但不登出
+        # 清除當前對話狀態，但不登出，且【保留 API Key】
         st.session_state.history = []
         st.session_state.current_persona = {}
         st.session_state.chat_session_initialized = False
@@ -155,16 +154,23 @@ if st.session_state.chat_session_initialized:
 
 st.sidebar.markdown("---")
 st.sidebar.warning("🔑 請輸入您自己的 Gemini API Key 以開始演練")
-api_key = st.sidebar.text_input("在此貼上您的 API Key", type="password")
 
-if not api_key:
+# 【改良】利用 value 綁定 session_state，讓系統記住 API Key
+input_key = st.sidebar.text_input("在此貼上您的 API Key", type="password", value=st.session_state.api_key)
+
+# 一旦使用者輸入，就立刻存入深層記憶中
+if input_key:
+    st.session_state.api_key = input_key
+
+# 檢查記憶體中是否有 API Key
+if not st.session_state.api_key:
     st.info("💡 提示：請先在側邊欄輸入 API Key，否則系統無法運作。")
     st.stop() 
     
 valid_model_name = None
-if api_key:
+if st.session_state.api_key:
     try:
-        genai.configure(api_key=api_key)
+        genai.configure(api_key=st.session_state.api_key)
         available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         if available_models:
             valid_model_name = st.sidebar.selectbox("🤖 AI 模型", available_models)
@@ -209,7 +215,7 @@ def generate_random_persona(grade):
 # --- 6. 模擬器主畫面 ---
 st.title("🛡️ 創傷知情模擬器")
 
-if st.session_state.loaded_text and api_key and valid_model_name:
+if st.session_state.loaded_text and st.session_state.api_key and valid_model_name:
     model = genai.GenerativeModel(
         model_name=valid_model_name,
         safety_settings={
