@@ -373,7 +373,7 @@ if st.session_state.history:
     st.sidebar.subheader("💾 紀錄保存")
     df = pd.DataFrame(st.session_state.history)
     df['nickname'] = st.session_state.user_nickname
-    df['time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    df['time'] = (datetime.now() + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
     
     persona_json = json.dumps(st.session_state.current_persona, ensure_ascii=False)
     df['meta_persona'] = persona_json
