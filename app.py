@@ -15,91 +15,104 @@ import time
 # --- 1. 系統設定 ---
 st.set_page_config(page_title="創傷知情模擬器 (研究完全版)", layout="wide")
 
-# --- 0. 檢查是否剛登出 (放在最前面攔截) ---
-if st.session_state.get("logout_triggered"):
-    st.markdown("## ✅ 已成功登出")
-    st.success("您的對話紀錄已安全上傳至雲端。感謝您的參與！")
-    st.write("如果您需要再次練習，請點擊下方按鈕。")
+# --- Google Sheets 背景自動上傳函式 (Auto-Save 版) ---
+def auto_save_to_google_sheets(user_id, chat_history):
+    """每次對話更新時，自動在背景覆寫/更新該次對話紀錄"""
+    if not chat_history:
+        return False
+        
+    try:
+        # 1. 連線與設定
+        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        if "private_key" in creds_dict:
+            creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+        
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        client = gspread.authorize(creds)
+        
+        # 2. 開啟試算表
+        sheet = client.open("2025創傷知情研習數據") 
+        worksheet = sheet.worksheet("Simulator")
+        
+        # 3. 準備資料
+        tw_fix = timedelta(hours=8)
+        start_t = st.session_state.get('start_time', datetime.now())
+        login_str = (start_t + tw_fix).strftime("%Y-%m-%d %H:%M:%S")
+        end_t = datetime.now()
+        logout_str = (end_t + tw_fix).strftime("%Y-%m-%d %H:%M:%S") # 視為最後更新時間
+        duration_mins = round((end_t - start_t).total_seconds() / 60, 2)
+        
+        # 建立專屬的 Session ID (用登入時間標記這回合對話)
+        session_id = f"{user_id}_{login_str}"
+        
+        # 4. 整理對話內容
+        scenario = st.session_state.get("current_persona", {})
+        basic_info = f"角色:{scenario.get('name','未知')}/觸發:{scenario.get('trigger','未知')}"
+        adv_info = f"第{scenario.get('session_num',1)}次/關係:{scenario.get('relation','未知')}/前情:{scenario.get('recent_event','無')}"
+        scenario_str = f"{basic_info} | {adv_info}"
+        
+        full_conversation = f"【演練案例】：{scenario_str}\n\n"
+        for msg in chat_history:
+            role = msg.get("role", "Unknown")
+            content = ""
+            if "parts" in msg:
+                content = msg["parts"][0] if isinstance(msg["parts"], list) else str(msg["parts"])
+            elif "content" in msg:
+                content = msg["content"]
+            full_conversation += f"[{role}]: {content}\n"
+
+        # 5. 尋找並更新，或新增一筆
+        # 我們利用 Session ID 確保同一次登入的對話會蓋掉舊的，不斷更新
+        records = worksheet.get_all_records()
+        row_to_update = None
+        # 尋找是否存在同一個 session_id 的紀錄 (假設我們把 session_id 藏在備註或利用時間比對)
+        # 簡單作法：比對「登入時間」和「學員編號」
+        col_logins = worksheet.col_values(1) # 第一欄：登入時間
+        col_ids = worksheet.col_values(3)    # 第三欄：學員編號
+        
+        for i in range(1, len(col_logins)): # 跳過標題列
+            if i < len(col_ids) and col_logins[i] == login_str and str(col_ids[i]) == str(user_id):
+                row_to_update = i + 1 # Gspread 索引從 1 開始
+                break
+                
+        # 計算累積次數
+        login_count = col_ids.count(str(user_id))
+        if row_to_update is None:
+            login_count += 1 # 新增一筆
+            
+        data_row = [login_str, logout_str, user_id, duration_mins, login_count, full_conversation]
+        
+        if row_to_update:
+            # 更新既有列 (A:F)
+            cell_range = f'A{row_to_update}:F{row_to_update}'
+            worksheet.update(cell_range, [data_row])
+        else:
+            # 新增一列
+            worksheet.append_row(data_row)
+            
+        return True
+    except Exception as e:
+        print(f"背景上傳失敗: {e}") # 背景報錯不干擾使用者
+        return False
+
+# --- 防呆防超速發送函式 ---
+def send_message_safely(chat_session, text):
+    """帶有強制延遲與錯誤處理的發送機制"""
+    # [防呆 1] 強制減速：每次發話前強制等 2 秒，避免老師按太快
+    time.sleep(2) 
     
-    if st.button("🔄 重新登入"):
-        st.session_state.logout_triggered = False
-        st.rerun()
-    st.stop()
-
-# --- Google Sheets 上傳函式 (含自動重試機制) ---
-def save_to_google_sheets(user_id, chat_history):
-    max_retries = 3  # 最大重試次數
-    delay = 2        # 初始等待秒數
-
-    for attempt in range(max_retries):
-        try:
-            # 1. 連線與設定
-            scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-            
-            # 建立新的憑證字典以避免修改原始 secrets，並處理換行符號問題
-            creds_dict = dict(st.secrets["gcp_service_account"])
-            if "private_key" in creds_dict:
-                creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
-            
-            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-            client = gspread.authorize(creds)
-            
-            # 2. 開啟試算表 (請確認檔名正確)
-            sheet = client.open("2025創傷知情研習數據") 
-            worksheet = sheet.worksheet("Simulator")
-            
-            # 3. 時間計算
-            tw_fix = timedelta(hours=8)
-            start_t = st.session_state.get('start_time', datetime.now())
-            login_str = (start_t + tw_fix).strftime("%Y-%m-%d %H:%M:%S")
-            end_t = datetime.now()
-            logout_str = (end_t + tw_fix).strftime("%Y-%m-%d %H:%M:%S")
-            duration_mins = round((end_t - start_t).total_seconds() / 60, 2)
-            
-            # 4. 計算累積次數
-            try:
-                all_ids = worksheet.col_values(3) 
-                login_count = all_ids.count(user_id) + 1
-            except:
-                login_count = 1
-
-            # 5. 整理情境資訊 (包含進階設定)
-            scenario = st.session_state.get("current_persona", {})
-            basic_info = f"角色:{scenario.get('name','未知')}/觸發:{scenario.get('trigger','未知')}"
-            adv_info = f"第{scenario.get('session_num',1)}次/關係:{scenario.get('relation','未知')}/前情:{scenario.get('recent_event','無')}"
-            scenario_str = f"{basic_info} | {adv_info}"
-            
-            full_conversation = f"【演練案例】：{scenario_str}\n\n"
-            for msg in chat_history:
-                role = msg.get("role", "Unknown")
-                content = ""
-                if "parts" in msg:
-                    content = msg["parts"][0] if isinstance(msg["parts"], list) else str(msg["parts"])
-                elif "content" in msg:
-                    content = msg["content"]
-                full_conversation += f"[{role}]: {content}\n"
-
-            # 6. 寫入資料
-            worksheet.append_row([
-                login_str, 
-                logout_str, 
-                user_id, 
-                duration_mins, 
-                login_count, 
-                full_conversation
-            ])
-            
-            return True # 成功則直接回傳 True
-
-        except Exception as e:
-            # 如果失敗，檢查是否還有重試機會
-            if attempt < max_retries - 1:
-                time.sleep(delay) # 等待
-                delay *= 2        # 等待時間加倍
-                continue          # 進行下一次嘗試
-            else:
-                st.error(f"❌ 上傳失敗 (已重試{max_retries}次)，請檢查網路狀況。\n錯誤訊息: {e}")
-                return False
+    try:
+        response = chat_session.send_message(text)
+        return response.text
+    except Exception as e:
+        error_msg = str(e).lower()
+        if "429" in error_msg or "quota" in error_msg:
+            # [防呆 2] 友善的超速提醒
+            st.warning("🐌 哎呀！您輸入的速度太快了，AI 老師喘不過氣來。請稍等 10 秒鐘後再試一次喔！(免費版速度限制)")
+            return None
+        else:
+            raise e # 其他嚴重錯誤照常拋出
 
 # 初始化 Session State
 if "history" not in st.session_state: st.session_state.history = []
@@ -126,23 +139,19 @@ if not st.session_state.user_nickname:
 
 # --- 3. 側邊欄設定 ---
 st.sidebar.title(f"👤 學員: {st.session_state.user_nickname}")
+st.sidebar.markdown("*(系統已開啟自動存檔功能)*")
 st.sidebar.markdown("---")
-st.sidebar.markdown("### 📤 結束練習")
 
-if st.sidebar.button("上傳紀錄並登出"):
-    if not st.session_state.history:
-        st.sidebar.warning("還沒有對話紀錄喔！")
-    else:
-        with st.spinner("正在上傳數據至雲端..."):
-            if save_to_google_sheets(st.session_state.user_nickname, st.session_state.history):
-                st.sidebar.success("✅ 上傳成功！")
-                time.sleep(1) 
-                keys_to_clear = ["user_nickname", "history", "current_persona", "start_time", "chat_session", "chat_session_initialized"]
-                for key in keys_to_clear:
-                    if key in st.session_state:
-                        del st.session_state[key]
-                st.session_state.logout_triggered = True
-                st.rerun()
+# [新增] 返回首頁按鈕
+if st.session_state.chat_session_initialized:
+    st.sidebar.markdown("### 🏠 導覽")
+    if st.sidebar.button("返回首頁 / 換個個案", type="secondary"):
+        # 清除當前對話狀態，但不登出
+        st.session_state.history = []
+        st.session_state.current_persona = {}
+        st.session_state.chat_session_initialized = False
+        st.session_state.start_time = datetime.now() # 重置時間以開啟新的 Session
+        st.rerun()
 
 st.sidebar.markdown("---")
 st.sidebar.warning("🔑 請輸入您自己的 Gemini API Key 以開始演練")
@@ -207,38 +216,31 @@ if st.session_state.loaded_text and api_key and valid_model_name:
             HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
             HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
             HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
         }
     )
 
     if not st.session_state.chat_session_initialized:
         tab1, tab2 = st.tabs(["🎲 隨機生成新個案", "📂 載入舊紀錄續談"])
         
-        # [模式一] 隨機新個案 (含進階情境設定)
+        # [模式一] 隨機新個案 
         with tab1:
             st.markdown("### 設定演練情境")
-            
-            # --- 新增：進階設定區塊 ---
             with st.expander("⚙️ 進階設定：自訂晤談情境 (非必填)", expanded=False):
                 col1, col2 = st.columns(2)
                 with col1:
-                    session_num = st.slider("這是第幾次晤談？", 1, 10, 1, help="設定您與該學生的互動歷史")
+                    session_num = st.slider("這是第幾次晤談？", 1, 10, 1)
                 with col2:
                     rel_status = st.selectbox("目前的信任關係", ["初次見面 / 不熟", "建立信任中", "關係良好 / 依賴", "關係破裂 / 敵對", "冷淡 / 防衛"], index=0)
-                
-                recent_event = st.text_input("近期發生事件 / 前情提要", value="無特殊事件，日常互動。", placeholder="例如：昨晚父母吵架、今天早上考試不及格...")
-            # -------------------------
+                recent_event = st.text_input("近期發生事件 / 前情提要", value="無特殊事件，日常互動。")
 
             if st.button("🎲 生成案例並開始", type="primary"):
                 persona = generate_random_persona(student_grade)
-                
-                # 將進階設定存入 persona
                 persona['session_num'] = session_num
                 persona['relation'] = rel_status
                 persona['recent_event'] = recent_event
-                
                 st.session_state.current_persona = persona
                 
-                # 強化版 Prompt：注入情境設定
                 sys_prompt = f"""
                 Role: You are a {persona['grade']} student named {persona['name']}. 
                 
@@ -267,14 +269,16 @@ if st.session_state.loaded_text and api_key and valid_model_name:
                 
                 st.session_state.chat_session = model.start_chat(history=[{"role":"user","parts":[sys_prompt]},{"role":"model","parts":["Ready."]}])
                 
-                # AI 開場
                 start_action = "Action: Start interaction based on context."
+                # 這裡不需要延遲，因為是系統初始化發送
                 resp = st.session_state.chat_session.send_message(start_action)
                 st.session_state.history.append({"role": "assistant", "content": resp.text})
                 st.session_state.chat_session_initialized = True
+                # 初始化後儲存第一筆紀錄
+                auto_save_to_google_sheets(st.session_state.user_nickname, st.session_state.history)
                 st.rerun()
         
-        # [模式二] 載入舊檔 (續談)
+        # [模式二] 載入舊檔
         with tab2:
             st.markdown("### 延續之前的演練")
             uploaded_file = st.file_uploader("請上傳上次下載的 .csv 紀錄檔", type=['csv'])
@@ -288,7 +292,6 @@ if st.session_state.loaded_text and api_key and valid_model_name:
                         p = st.session_state.current_persona
                         st.success(f"✅ 成功載入個案：{p['name']} (第{p.get('session_num','?')}次晤談)")
                         
-                        # 還原歷史與 Prompt
                         restored_history = []
                         gemini_history = []
                         
@@ -322,6 +325,8 @@ if st.session_state.loaded_text and api_key and valid_model_name:
                         st.session_state.chat_session_initialized = True
                         
                         if st.button("🚀 繼續對話"):
+                            # 重設 start_time 以開展新的 Session ID
+                            st.session_state.start_time = datetime.now()
                             st.rerun()
                     else:
                         st.error("❌ 這個 CSV 檔案不包含個案設定資料，無法用於續談。")
@@ -331,7 +336,6 @@ if st.session_state.loaded_text and api_key and valid_model_name:
     # C. 顯示對話
     if st.session_state.chat_session_initialized:
         p = st.session_state.current_persona
-        # 顯示詳細情境資訊
         st.info(f"🎭 **演練中**：{p.get('grade')}生 **{p.get('name')}** | 第 {p.get('session_num',1)} 次晤談 | 關係：{p.get('relation','未知')} | 前情：{p.get('recent_event','無')}")
         
         for msg in st.session_state.history:
@@ -341,12 +345,21 @@ if st.session_state.loaded_text and api_key and valid_model_name:
 
         if user_in := st.chat_input("老師回應..."):
             st.session_state.history.append({"role": "user", "content": user_in})
-            try:
-                resp = st.session_state.chat_session.send_message(user_in)
-                st.session_state.history.append({"role": "assistant", "content": resp.text})
-                st.rerun()
-            except Exception as e:
-                st.error(f"❌ 發生錯誤: {e}")
+            with st.chat_message("user"):
+                st.write(user_in)
+                
+            with st.spinner("⏳ 學生正在思考如何回應 (為防超速，請稍候)..."):
+                try:
+                    # 使用安全發送函式 (內建延遲與防呆)
+                    resp_text = send_message_safely(st.session_state.chat_session, user_in)
+                    
+                    if resp_text: # 如果沒被限速擋下
+                        st.session_state.history.append({"role": "assistant", "content": resp_text})
+                        # 【背景自動存檔】
+                        auto_save_to_google_sheets(st.session_state.user_nickname, st.session_state.history)
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"❌ 發生錯誤: {e}")
 
 # --- 7. 下載功能區 ---
 st.sidebar.markdown("---")
@@ -356,7 +369,6 @@ if st.session_state.history:
     df['nickname'] = st.session_state.user_nickname
     df['time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    # 存入完整的個案設定 (含進階情境)
     persona_json = json.dumps(st.session_state.current_persona, ensure_ascii=False)
     df['meta_persona'] = persona_json
     
