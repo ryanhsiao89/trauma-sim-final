@@ -93,23 +93,60 @@ def auto_save_to_google_sheets(user_id, chat_history):
         print(f"背景上傳失敗: {e}") # 背景報錯不干擾使用者
         return False
 
-# --- 防呆防超速發送函式 ---
-def send_message_safely(chat_session, text):
-    """帶有強制延遲與錯誤處理的發送機制"""
-    # [防呆 1] 強制減速：每次發話前強制等 2 秒，避免老師按太快
-    time.sleep(2) 
+# --- API 輪替與防呆發送機制 (Fallback Mechanism) ---
+def send_message_safely(text):
+    """
+    發送訊息，若失敗則自動切換至下一把 API Key 重試
+    """
+    time.sleep(1) # [防呆] 強制減速 1 秒
     
-    try:
-        response = chat_session.send_message(text)
-        return response.text
-    except Exception as e:
-        error_msg = str(e).lower()
-        if "429" in error_msg or "quota" in error_msg:
-            # [防呆 2] 友善的超速提醒
-            st.warning("🐌 哎呀！您輸入的速度太快了，AI 老師喘不過氣來。請稍等 10 秒鐘後再試一次喔！(免費版速度限制)")
-            return None
-        else:
-            raise e # 其他嚴重錯誤照常拋出
+    # 取得目前的對話歷史，準備手動創建新的 GenerativeModel 實例
+    gemini_history = []
+    for msg in st.session_state.history:
+        g_role = "model" if msg["role"] == "assistant" else "user"
+        gemini_history.append({"role": g_role, "parts": [msg["content"]]})
+        
+    api_keys = st.session_state.api_keys_list
+    total_keys = len(api_keys)
+    
+    # 開始輪替嘗試
+    for i in range(total_keys):
+        current_key_index = (st.session_state.current_key_index + i) % total_keys
+        active_key = api_keys[current_key_index]
+        
+        try:
+            # 使用當前的 Key 初始化模型
+            genai.configure(api_key=active_key)
+            model = genai.GenerativeModel(
+                model_name=st.session_state.valid_model_name,
+                safety_settings={
+                    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+                    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+                    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+                    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+                }
+            )
+            
+            # 使用目前的歷史紀錄建立 session
+            chat_session = model.start_chat(history=gemini_history)
+            response = chat_session.send_message(text)
+            
+            # 如果成功，記錄最後成功的 Key index，並回傳
+            st.session_state.current_key_index = current_key_index
+            return response.text
+            
+        except Exception as e:
+            error_msg = str(e).lower()
+            st.toast(f"⚠️ Key {current_key_index + 1} 發生狀況，嘗試切換...", icon="🔄")
+            
+            # 如果是最後一把 Key 也失敗了
+            if i == total_keys - 1:
+                if "429" in error_msg or "quota" in error_msg:
+                    st.warning("🐌 哎呀！您輸入的速度太快，或是目前所有 API 額度都耗盡了。請稍等 1 分鐘後再試喔！")
+                    return None
+                else:
+                    raise e
+            # 如果不是最後一把，繼續迴圈嘗試下一把
 
 # 初始化 Session State
 if "history" not in st.session_state: st.session_state.history = []
@@ -118,8 +155,12 @@ if "user_nickname" not in st.session_state: st.session_state.user_nickname = ""
 if "current_persona" not in st.session_state: st.session_state.current_persona = {}
 if "start_time" not in st.session_state: st.session_state.start_time = datetime.now()
 if "chat_session_initialized" not in st.session_state: st.session_state.chat_session_initialized = False
-# 【新增】確保 API Key 被安全記憶
-if "api_key" not in st.session_state: st.session_state.api_key = ""
+
+# 【新增】多重 API Key 記憶機制
+if "raw_api_key_input" not in st.session_state: st.session_state.raw_api_key_input = ""
+if "api_keys_list" not in st.session_state: st.session_state.api_keys_list = []
+if "current_key_index" not in st.session_state: st.session_state.current_key_index = 0
+if "valid_model_name" not in st.session_state: st.session_state.valid_model_name = "gemini-1.5-pro-latest" # 預設模型
 
 # --- 2. 登入區 ---
 if not st.session_state.user_nickname:
@@ -145,40 +186,42 @@ st.sidebar.markdown("---")
 if st.session_state.chat_session_initialized:
     st.sidebar.markdown("### 🏠 導覽")
     if st.sidebar.button("返回首頁 / 換個個案", type="secondary"):
-        # 清除當前對話狀態，但不登出，且【保留 API Key】
         st.session_state.history = []
         st.session_state.current_persona = {}
         st.session_state.chat_session_initialized = False
-        st.session_state.start_time = datetime.now() # 重置時間以開啟新的 Session
+        st.session_state.start_time = datetime.now() 
         st.rerun()
 
 st.sidebar.markdown("---")
-st.sidebar.warning("🔑 請輸入您自己的 Gemini API Key 以開始演練")
+st.sidebar.warning("🔑 請輸入您的 Gemini API Key (可輸入多組)")
+st.sidebar.markdown("<small>提示：輸入多組 Key 請用半形逗號 `,` 隔開，可防當機</small>", unsafe_allow_html=True)
 
-# 【改良】利用 value 綁定 session_state，讓系統記住 API Key
-input_key = st.sidebar.text_input("在此貼上您的 API Key", type="password", value=st.session_state.api_key)
+input_key = st.sidebar.text_input("在此貼上您的 API Key", type="password", value=st.session_state.raw_api_key_input)
 
-# 一旦使用者輸入，就立刻存入深層記憶中
 if input_key:
-    st.session_state.api_key = input_key
+    st.session_state.raw_api_key_input = input_key
+    # 將逗號分隔的字串轉為 List，並清除空白
+    st.session_state.api_keys_list = [k.strip() for k in input_key.split(",") if k.strip()]
 
-# 檢查記憶體中是否有 API Key
-if not st.session_state.api_key:
-    st.info("💡 提示：請先在側邊欄輸入 API Key，否則系統無法運作。")
+if not st.session_state.api_keys_list:
+    st.info("💡 提示：請先在側邊欄輸入至少一組 API Key，否則系統無法運作。")
     st.stop() 
     
-valid_model_name = None
-if st.session_state.api_key:
+# 模型偵測 (用第一把 Key 測試即可)
+if st.session_state.api_keys_list:
     try:
-        genai.configure(api_key=st.session_state.api_key)
+        genai.configure(api_key=st.session_state.api_keys_list[0])
         available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         if available_models:
-            valid_model_name = st.sidebar.selectbox("🤖 AI 模型", available_models)
+            st.session_state.valid_model_name = st.sidebar.selectbox("🤖 AI 模型", available_models)
     except: 
-        st.sidebar.error("❌ API Key 無效")
+        st.sidebar.error("❌ 第一把 API Key 無效，請檢查。")
 
 student_grade = st.sidebar.selectbox("學生年級 (新個案適用)", ["國小", "國中", "高中"])
 lang = st.sidebar.selectbox("語言", ["繁體中文", "粵語", "English"])
+
+# 顯示目前使用的 Key 狀態 (除錯或安心用)
+st.sidebar.caption(f"🛡️ 目前備妥 {len(st.session_state.api_keys_list)} 把 API Key 輪替中")
 
 # --- 4. 自動讀取教材 ---
 if not st.session_state.loaded_text:
@@ -215,16 +258,7 @@ def generate_random_persona(grade):
 # --- 6. 模擬器主畫面 ---
 st.title("🛡️ 創傷知情模擬器")
 
-if st.session_state.loaded_text and st.session_state.api_key and valid_model_name:
-    model = genai.GenerativeModel(
-        model_name=valid_model_name,
-        safety_settings={
-            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-        }
-    )
+if st.session_state.loaded_text and st.session_state.api_keys_list and st.session_state.valid_model_name:
 
     if not st.session_state.chat_session_initialized:
         tab1, tab2 = st.tabs(["🎲 隨機生成新個案", "📂 載入舊紀錄續談"])
@@ -273,15 +307,15 @@ if st.session_state.loaded_text and st.session_state.api_key and valid_model_nam
                 4. Stay in character. Do not explain you are an AI.
                 """
                 
-                st.session_state.chat_session = model.start_chat(history=[{"role":"user","parts":[sys_prompt]},{"role":"model","parts":["Ready."]}])
-                
-                start_action = "Action: Start interaction based on context."
-                # 這裡不需要延遲，因為是系統初始化發送
-                resp = st.session_state.chat_session.send_message(start_action)
-                st.session_state.history.append({"role": "assistant", "content": resp.text})
+                # 初始化對話歷史
+                st.session_state.history = [{"role": "user", "content": sys_prompt}]
                 st.session_state.chat_session_initialized = True
-                # 初始化後儲存第一筆紀錄
-                auto_save_to_google_sheets(st.session_state.user_nickname, st.session_state.history)
+                
+                # 使用輪替機制發送第一句
+                resp_text = send_message_safely("Action: Start interaction based on context.")
+                if resp_text:
+                    st.session_state.history.append({"role": "assistant", "content": resp_text})
+                    auto_save_to_google_sheets(st.session_state.user_nickname, st.session_state.history)
                 st.rerun()
         
         # [模式二] 載入舊檔
@@ -299,8 +333,6 @@ if st.session_state.loaded_text and st.session_state.api_key and valid_model_nam
                         st.success(f"✅ 成功載入個案：{p['name']} (第{p.get('session_num','?')}次晤談)")
                         
                         restored_history = []
-                        gemini_history = []
-                        
                         sys_prompt = f"""
                         Role: You are a {p['grade']} student named {p['name']}. 
                         Trauma Background: {p['background']}. 
@@ -316,22 +348,18 @@ if st.session_state.loaded_text and st.session_state.api_key and valid_model_nam
                         
                         Instruction: Continue the conversation naturally. Language: {lang}.
                         """
-                        gemini_history.append({"role":"user","parts":[sys_prompt]})
-                        gemini_history.append({"role":"model","parts":["Ready."]})
+                        restored_history.append({"role":"user", "content": sys_prompt})
                         
+                        # 略過原本的第一句 prompt，只載入對話內容
                         for index, row in df.iterrows():
-                            role = row['role']
-                            content = row['content']
-                            restored_history.append({"role": role, "content": content})
-                            g_role = "model" if role == "assistant" else "user"
-                            gemini_history.append({"role": g_role, "parts": [str(content)]})
+                            # 因為舊紀錄可能包含了一開始的 sys_prompt，我們過濾一下避免重複
+                            if "Role: You are a" not in str(row['content']):
+                                restored_history.append({"role": row['role'], "content": row['content']})
                         
                         st.session_state.history = restored_history
-                        st.session_state.chat_session = model.start_chat(history=gemini_history)
                         st.session_state.chat_session_initialized = True
                         
                         if st.button("🚀 繼續對話"):
-                            # 重設 start_time 以開展新的 Session ID
                             st.session_state.start_time = datetime.now()
                             st.rerun()
                     else:
@@ -346,8 +374,10 @@ if st.session_state.loaded_text and st.session_state.api_key and valid_model_nam
         
         for msg in st.session_state.history:
             role = "assistant" if msg["role"] == "assistant" else "user"
-            with st.chat_message(role):
-                st.write(msg["content"])
+            # 隱藏系統 Prompt，不讓使用者看到落落長的設定
+            if "Role: You are a" not in msg["content"]:
+                with st.chat_message(role):
+                    st.write(msg["content"])
 
         if user_in := st.chat_input("老師回應..."):
             st.session_state.history.append({"role": "user", "content": user_in})
@@ -356,16 +386,15 @@ if st.session_state.loaded_text and st.session_state.api_key and valid_model_nam
                 
             with st.spinner("⏳ 學生正在思考如何回應 (為防超速，請稍候)..."):
                 try:
-                    # 使用安全發送函式 (內建延遲與防呆)
-                    resp_text = send_message_safely(st.session_state.chat_session, user_in)
+                    # 使用自動輪替機制的安全發送函式
+                    resp_text = send_message_safely(user_in)
                     
-                    if resp_text: # 如果沒被限速擋下
+                    if resp_text: 
                         st.session_state.history.append({"role": "assistant", "content": resp_text})
-                        # 【背景自動存檔】
                         auto_save_to_google_sheets(st.session_state.user_nickname, st.session_state.history)
                         st.rerun()
                 except Exception as e:
-                    st.error(f"❌ 發生錯誤: {e}")
+                    st.error(f"❌ 發生嚴重錯誤: {e}")
 
 # --- 7. 下載功能區 ---
 st.sidebar.markdown("---")
