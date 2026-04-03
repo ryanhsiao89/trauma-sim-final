@@ -156,7 +156,7 @@ if "current_persona" not in st.session_state: st.session_state.current_persona =
 if "start_time" not in st.session_state: st.session_state.start_time = datetime.now()
 if "chat_session_initialized" not in st.session_state: st.session_state.chat_session_initialized = False
 
-# 【新增】多重 API Key 記憶機制
+# 多重 API Key 記憶機制
 if "raw_api_key_input" not in st.session_state: st.session_state.raw_api_key_input = ""
 if "api_keys_list" not in st.session_state: st.session_state.api_keys_list = []
 if "current_key_index" not in st.session_state: st.session_state.current_key_index = 0
@@ -281,6 +281,7 @@ if st.session_state.loaded_text and st.session_state.api_keys_list and st.sessio
                 persona['recent_event'] = recent_event
                 st.session_state.current_persona = persona
                 
+                # 【加入括號表情指示的強化版 Prompt】
                 sys_prompt = f"""
                 Role: You are a {persona['grade']} student named {persona['name']}. 
                 
@@ -305,6 +306,7 @@ if st.session_state.loaded_text and st.session_state.api_keys_list and st.sessio
                 2. Respond naturally based on your response mode ({persona['response_mode']}).
                 3. Language: {lang}.
                 4. Stay in character. Do not explain you are an AI.
+                5. Actions and Expressions: The user may use parentheses ( ) to describe their non-verbal behaviors. YOU MUST also use parentheses ( ) to describe the student's body language, facial expressions, or emotional state in your responses.
                 """
                 
                 # 初始化對話歷史
@@ -333,6 +335,7 @@ if st.session_state.loaded_text and st.session_state.api_keys_list and st.sessio
                         st.success(f"✅ 成功載入個案：{p['name']} (第{p.get('session_num','?')}次晤談)")
                         
                         restored_history = []
+                        # 【續談時同樣加入括號表情指示】
                         sys_prompt = f"""
                         Role: You are a {p['grade']} student named {p['name']}. 
                         Trauma Background: {p['background']}. 
@@ -346,13 +349,13 @@ if st.session_state.loaded_text and st.session_state.api_keys_list and st.sessio
                         
                         Knowledge Base: {st.session_state.loaded_text[:25000]}
                         
-                        Instruction: Continue the conversation naturally. Language: {lang}.
+                        Instruction: Continue the conversation naturally. Language: {lang}. 
+                        Remember: YOU MUST use parentheses ( ) to describe the student's body language, facial expressions, or emotional state in your responses.
                         """
                         restored_history.append({"role":"user", "content": sys_prompt})
                         
                         # 略過原本的第一句 prompt，只載入對話內容
                         for index, row in df.iterrows():
-                            # 因為舊紀錄可能包含了一開始的 sys_prompt，我們過濾一下避免重複
                             if "Role: You are a" not in str(row['content']):
                                 restored_history.append({"role": row['role'], "content": row['content']})
                         
@@ -379,7 +382,7 @@ if st.session_state.loaded_text and st.session_state.api_keys_list and st.sessio
                 with st.chat_message(role):
                     st.write(msg["content"])
 
-        if user_in := st.chat_input("老師回應..."):
+        if user_in := st.chat_input("老師回應... (可用括號描述動作，例如：(微笑點頭) 發生什麼事了？)"):
             st.session_state.history.append({"role": "user", "content": user_in})
             with st.chat_message("user"):
                 st.write(user_in)
