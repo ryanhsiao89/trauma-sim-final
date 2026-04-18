@@ -93,16 +93,21 @@ def auto_save_to_google_sheets(user_id, chat_history):
         print(f"背景上傳失敗: {e}") # 背景報錯不干擾使用者
         return False
 
-# --- API 輪替與防呆發送機制 (Fallback Mechanism) ---
+# --- API 輪替與防呆發送機制 (角色強化版) ---
 def send_message_safely(text):
     """
-    發送訊息，若失敗則自動切換至下一把 API Key 重試
+    發送訊息，若失敗則自動切換至下一把 API Key 重試。
+    加入 system_instruction 防護機制，確保切換 Key 時學生角色絕不突變。
     """
     time.sleep(1) # [防呆] 強制減速 1 秒
     
-    # 取得目前的對話歷史，準備手動創建新的 GenerativeModel 實例
+    # --- 關鍵修改 1：分離 System Prompt 與一般對話歷史 ---
+    # 我們的設計中，history 的第一筆 [0] 永遠是學生的角色設定 (sys_prompt)
+    system_prompt = st.session_state.history[0]["content"]
+    
+    # 取得除了第一筆 (sys_prompt) 之外的純對話歷史
     gemini_history = []
-    for msg in st.session_state.history:
+    for msg in st.session_state.history[1:]:
         g_role = "model" if msg["role"] == "assistant" else "user"
         gemini_history.append({"role": g_role, "parts": [msg["content"]]})
         
@@ -117,8 +122,11 @@ def send_message_safely(text):
         try:
             # 使用當前的 Key 初始化模型
             genai.configure(api_key=active_key)
+            
+            # --- 關鍵修改 2：將 System Prompt 綁定為 system_instruction ---
             model = genai.GenerativeModel(
                 model_name=st.session_state.valid_model_name,
+                system_instruction=system_prompt, # <--- 鎖定學生角色的絕對防線！
                 safety_settings={
                     HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
                     HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
@@ -127,7 +135,7 @@ def send_message_safely(text):
                 }
             )
             
-            # 使用目前的歷史紀錄建立 session
+            # 使用純淨的歷史紀錄建立 session
             chat_session = model.start_chat(history=gemini_history)
             response = chat_session.send_message(text)
             
@@ -160,7 +168,7 @@ if "chat_session_initialized" not in st.session_state: st.session_state.chat_ses
 if "raw_api_key_input" not in st.session_state: st.session_state.raw_api_key_input = ""
 if "api_keys_list" not in st.session_state: st.session_state.api_keys_list = []
 if "current_key_index" not in st.session_state: st.session_state.current_key_index = 0
-if "valid_model_name" not in st.session_state: st.session_state.valid_model_name = "gemini-1.5-pro-latest" # 預設模型
+if "valid_model_name" not in st.session_state: st.session_state.valid_model_name = "gemini-2.5-flash" # 修正預設模型為 2.5-flash
 
 # --- 2. 登入區 ---
 if not st.session_state.user_nickname:
@@ -213,7 +221,9 @@ if st.session_state.api_keys_list:
         genai.configure(api_key=st.session_state.api_keys_list[0])
         available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         if available_models:
-            st.session_state.valid_model_name = st.sidebar.selectbox("🤖 AI 模型", available_models)
+            # 動態抓取 2.5-flash 作為預設選單值
+            default_idx = available_models.index("models/gemini-2.5-flash") if "models/gemini-2.5-flash" in available_models else 0
+            st.session_state.valid_model_name = st.sidebar.selectbox("🤖 AI 模型", available_models, index=default_idx)
     except: 
         st.sidebar.error("❌ 第一把 API Key 無效，請檢查。")
 
@@ -354,7 +364,7 @@ if st.session_state.loaded_text and st.session_state.api_keys_list and st.sessio
                         """
                         restored_history.append({"role":"user", "content": sys_prompt})
                         
-                        # 略過原本的第一句 prompt，只載入對話內容
+                        # 略過原本的第一句 prompt，只載入純對話內容
                         for index, row in df.iterrows():
                             if "Role: You are a" not in str(row['content']):
                                 restored_history.append({"role": row['role'], "content": row['content']})
