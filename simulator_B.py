@@ -13,6 +13,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import time
 
 # --- 1. 系統設定 ---
+# 💡 提示：如果您貼在 B 檔案，可以把這裡改成 "創傷知情模擬器 (分流B)"
 st.set_page_config(page_title="創傷知情模擬器 (分流B)", layout="wide") 
 
 # --- Google Sheets 背景自動上傳函式 (Auto-Save 版) ---
@@ -93,16 +94,19 @@ def auto_save_to_google_sheets(user_id, chat_history):
         print(f"背景上傳失敗: {e}") # 背景報錯不干擾使用者
         return False
 
-# --- API 輪替與防呆發送機制 (Fallback Mechanism) ---
+# --- API 輪替與防呆發送機制 (角色強化版) ---
 def send_message_safely(text):
     """
     發送訊息，若失敗則自動切換至下一把 API Key 重試
     """
     time.sleep(1) # [防呆] 強制減速 1 秒
     
-    # 取得目前的對話歷史，準備手動創建新的 GenerativeModel 實例
+    # --- 關鍵防護：抽離 System Prompt 以鎖定角色 ---
+    system_prompt = st.session_state.history[0]["content"]
+    
+    # 取得純對話歷史
     gemini_history = []
-    for msg in st.session_state.history:
+    for msg in st.session_state.history[1:]:
         g_role = "model" if msg["role"] == "assistant" else "user"
         gemini_history.append({"role": g_role, "parts": [msg["content"]]})
         
@@ -117,8 +121,11 @@ def send_message_safely(text):
         try:
             # 使用當前的 Key 初始化模型
             genai.configure(api_key=active_key)
+            
+            # 將學生的角色設定綁死在系統底層
             model = genai.GenerativeModel(
                 model_name=st.session_state.valid_model_name,
+                system_instruction=system_prompt, # <--- 防失憶關鍵！
                 safety_settings={
                     HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
                     HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
@@ -160,7 +167,7 @@ if "chat_session_initialized" not in st.session_state: st.session_state.chat_ses
 if "raw_api_key_input" not in st.session_state: st.session_state.raw_api_key_input = ""
 if "api_keys_list" not in st.session_state: st.session_state.api_keys_list = []
 if "current_key_index" not in st.session_state: st.session_state.current_key_index = 0
-if "valid_model_name" not in st.session_state: st.session_state.valid_model_name = "gemini-1.5-pro-latest" # 預設模型
+if "valid_model_name" not in st.session_state: st.session_state.valid_model_name = "gemini-2.5-flash" # 預設模型
 
 # --- 2. 登入區 ---
 if not st.session_state.user_nickname:
@@ -213,7 +220,8 @@ if st.session_state.api_keys_list:
         genai.configure(api_key=st.session_state.api_keys_list[0])
         available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         if available_models:
-            st.session_state.valid_model_name = st.sidebar.selectbox("🤖 AI 模型", available_models)
+            default_idx = available_models.index("models/gemini-2.5-flash") if "models/gemini-2.5-flash" in available_models else 0
+            st.session_state.valid_model_name = st.sidebar.selectbox("🤖 AI 模型", available_models, index=default_idx)
     except: 
         st.sidebar.error("❌ 第一把 API Key 無效，請檢查。")
 
